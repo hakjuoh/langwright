@@ -1,0 +1,62 @@
+{
+  "name": "@hakjuoh/langwright",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "author": "Hakju Oh <hakju.oh@gmail.com>",
+  "files": [
+    "dist/src",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "type": "commonjs",
+  "exports": {
+    "./test": {
+      "types": "./dist/src/test.d.ts",
+      "require": "./dist/src/test.js",
+      "import": "./dist/src/test.js"
+    },
+    "./config": {
+      "types": "./dist/src/config.d.ts",
+      "require": "./dist/src/config.js",
+      "import": "./dist/src/config.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "test": [
+        "dist/src/test.d.ts"
+      ],
+      "config": [
+        "dist/src/config.d.ts"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "unit": "npm run build && node --test dist/tests/unit/*.test.js",
+    "tests": "npm run build && LANGWRIGHT_CONFIG=langwright.config.ts playwright test --config=playwright.config.ts",
+    "quality": "npm run typecheck && npm run lint && npm run unit && npm run tests && npm run audit:high",
+    "quality:codeql": "rm -rf /tmp/langwright-codeql-db /tmp/langwright-codeql-results.sarif && codeql pack download codeql/javascript-queries@2.3.10 && codeql database create /tmp/langwright-codeql-db --language=javascript-typescript --source-root . --command=\"npm run build\" --overwrite && codeql database analyze /tmp/langwright-codeql-db codeql/javascript-queries@2.3.10:codeql-suites/javascript-security-and-quality.qls --format=sarif-latest --output=/tmp/langwright-codeql-results.sarif && node scripts/codeql-quality-check.js /tmp/langwright-codeql-results.sarif",
+    "audit:high": "npm audit --audit-level=high"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.60.0"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.48",
+    "@langchain/openai": "^1.4.7",
+    "langchain": "^1.4.2",
+    "typescript": "^5.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^25.9.1",
+    "@typescript-eslint/eslint-plugin": "^8.60.0",
+    "@typescript-eslint/parser": "^8.60.0",
+    "eslint": "^10.4.1"
+  }
+}
