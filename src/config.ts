@@ -1,7 +1,8 @@
 import type { LangwrightConfig } from './shared/types.js';
 import { DEFAULT_AGENT_NAME, LANGWRIGHT_VERSION } from './config/defaults.js';
 
-export { createAgent } from './agent/agent.js';
+export { createGenerator } from './agent/generator.js';
+export { createHealer } from './agent/healer.js';
 
 /**
  * Helper for authoring `langwright.config.*` with TypeScript support.

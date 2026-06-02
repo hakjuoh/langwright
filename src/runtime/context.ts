@@ -1,4 +1,5 @@
-import type { AgentInstructionBlock, AgentInstructionBlockKind, AgentTestContext } from '../shared/types.js';
+import { normalizeInstructionText } from './template.js';
+import type { AgentTestContext, ScenarioBlock } from '../shared/types.js';
 
 /**
  * The active Langwright test context.
@@ -8,7 +9,7 @@ import type { AgentInstructionBlock, AgentInstructionBlockKind, AgentTestContext
  * so an ALS store established around `use()` does not reach the body. Playwright
  * runs at most one test at a time per worker process, so a module-level variable
  * scoped by `withAgentTestContext` covers the whole test (body, hooks, and the
- * agent run) without depending on async-context propagation.
+ * scenario runs) without depending on async-context propagation.
  */
 let currentContext: AgentTestContext | undefined;
 
@@ -45,12 +46,18 @@ export function getAgentTestContext(): AgentTestContext {
 }
 
 /**
- * Append a natural-language instruction block to the current test and return it
- * so the caller can run it as a turn.
+ * Append a scenario block to the current test and return it so the caller can
+ * run it through the session. Both halves are indentation-normalized; an empty
+ * expectation collapses to `undefined` (an action-only scenario).
  */
-export function appendAgentBlock(kind: AgentInstructionBlockKind, text: string): AgentInstructionBlock {
+export function appendScenarioBlock(steps: string, expect?: string): ScenarioBlock {
   const context = getAgentTestContext();
-  const block: AgentInstructionBlock = { id: nextBlockId(context), kind, text };
+  const normalizedExpect = expect === undefined ? undefined : normalizeInstructionText(expect);
+  const block: ScenarioBlock = {
+    id: nextBlockId(context),
+    steps: normalizeInstructionText(steps),
+    expect: normalizedExpect && normalizedExpect.length > 0 ? normalizedExpect : undefined,
+  };
   context.blocks.push(block);
 
   return block;

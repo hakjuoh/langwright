@@ -6,74 +6,88 @@ import type {
   TestInfo,
   TestStatus,
 } from '@playwright/test';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 
 /**
  * Playwright option fixtures that are copied into the Langwright execution
  * scope. These are exposed both as top-level variables and under `options`
- * when the agent runs `playwright_run`.
+ * when the generated Playwright code runs.
  */
 export type LangwrightFixtureOptions = PlaywrightTestOptions & PlaywrightWorkerOptions;
 
 /**
- * Natural-language instruction categories accepted by the Langwright DSL.
- * `steps` describe browser actions; `expectation` blocks describe assertions
- * that must pass at their exact position in the instruction stream.
+ * The two halves a `scenario(...)` call can carry. `steps` become Playwright
+ * actions; `expectation` become `expect(...)` assertions. Used to label native
+ * Playwright code spans and ATIF turns.
  */
 export type AgentInstructionBlockKind = 'steps' | 'expectation';
 
 /**
- * A natural-language instruction block recorded from `steps` or `expect`.
+ * One awaited `scenario(steps, expect?)` call: the unit of generation and
+ * execution. The steps are converted into action code and the optional
+ * expectation into assertion code by the Generator, then run together.
  */
-export interface AgentInstructionBlock {
-  /** Stable block ID used in prompts, traces, and generated code spans. */
+export interface ScenarioBlock {
+  /** Stable block ID used in prompts, trajectory events, and generated spans. */
   id: string;
-  /** Whether the block is an action step or an expectation. */
-  kind: AgentInstructionBlockKind;
-  /** Rendered natural-language text from the tagged template. */
-  text: string;
+  /** Rendered natural-language action text (required). */
+  steps: string;
+  /** Rendered natural-language expectation text, when the call supplied one. */
+  expect?: string;
 }
 
 /**
  * Ordered work item collected while a Langwright test body is evaluated.
  */
-export type AgentBlock = AgentInstructionBlock;
+export type AgentBlock = ScenarioBlock;
 
 /**
- * Per-test runtime state shared between the DSL, LangChain tools, executor,
- * and artifact builders.
+ * Best-effort accessibility/state snapshot of the live page, passed to the
+ * Generator (to author robust locators) and the Healer (to diagnose failures).
+ */
+export interface PageSnapshot {
+  /** AI-optimized ARIA snapshot of the page body, when it could be captured. */
+  ariaSnapshot?: string;
+  /** Current page URL. */
+  url?: string;
+  /** Current page title. */
+  title?: string;
+}
+
+/**
+ * Per-test runtime state shared between the DSL, the stage modules, and the
+ * artifact builders.
  */
 export interface AgentTestContext {
-  /** Complete Playwright fixture bundle exposed to tests and tools. */
+  /** Complete Playwright fixture bundle exposed to tests and generated code. */
   fixtures: LangwrightFixtures;
   /** Active Playwright page convenience reference. */
   page: PlaywrightTestArgs['page'];
   /** Playwright Test metadata for the running test. */
   testInfo: TestInfo;
-  /** Ordered DSL blocks collected before the agent executes. */
+  /** Ordered scenario blocks collected as the body runs. */
   blocks: AgentBlock[];
   /** Monotonic counter used to allocate `block-N` identifiers. */
   nextBlockIndex: number;
-  /** Raw `playwright_run` tool calls captured during agent execution. */
-  trace: AgentTraceEvent[];
   /** Best-effort source location of the user-authored Langwright test. */
   sourceLocation?: AgentSourceLocation;
   /**
    * User-defined fixtures and `register(...)` objects captured for this test,
-   * injected into the `playwright_run` scope under their own names. Refreshed
-   * (non-draining) before each incremental turn so registrations made between
-   * awaited DSL calls reach the agent, and snapshotted when the test finalizes.
+   * injected into the generated-code scope under their own names. Refreshed
+   * (non-draining) before each scenario so registrations made between awaited
+   * DSL calls reach the Generator, and snapshotted when the test finalizes.
    */
   userFixtures?: Record<string, unknown>;
   /**
    * Worker-scoped fixture names this test is allowed to expose, derived from the
-   * test body signature. Used to gate which worker captures reach the agent when
-   * refreshing {@link userFixtures} for each turn.
+   * test body signature. Gates which worker captures reach the generated-code
+   * scope when refreshing {@link userFixtures} per scenario.
    */
   exposedWorkerNames?: ReadonlySet<string>;
   /**
-   * The active multi-turn agent session, present during the per-test runtime so
-   * each awaited DSL call can run one turn through it. Absent for one-shot paths
-   * such as scope hooks that drive the agent through {@link AgentExecutor.run}.
+   * The active session, present during the per-test runtime so each awaited DSL
+   * call can run one scenario through it. Absent for one-shot paths such as
+   * scope hooks that drive the session through {@link AgentExecutor.run}.
    */
   session?: AgentSession;
 }
@@ -99,27 +113,280 @@ export type LangwrightFixtures = PlaywrightTestArgs &
     options: LangwrightFixtureOptions;
   };
 
+/* -------------------------------------------------------------------------- */
+/* Stage 1: Generate                                                          */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Normalized result produced by an agent executor.
+ * Provider-agnostic LLM usage sample collected from one structured-output call.
+ */
+export interface MetricSample {
+  /** Token usage record extracted from the raw model response. */
+  usage: Record<string, unknown>;
+  /** Response metadata (model name, provider) extracted from the raw response. */
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Everything the Generator needs to convert one scenario into Playwright code.
+ */
+export interface GeneratorInput {
+  /** The scenario being converted. */
+  block: ScenarioBlock;
+  /** One-line descriptions of objects available by name in the run scope. */
+  registeredObjects: string[];
+  /** Live page snapshot used to author robust locators. */
+  snapshot: PageSnapshot;
+  /** Test title, for orientation. */
+  testTitle: string;
+}
+
+/**
+ * Playwright code generated for one scenario. `actionCode` performs the steps;
+ * `assertionCode` holds `expect(...)` assertions for the optional expectation.
+ */
+export interface GeneratedScenario {
+  /** Source scenario block ID. */
+  blockId: string;
+  /** Playwright action code implementing the scenario's steps. */
+  actionCode: string;
+  /** `expect(...)` assertion code implementing the scenario's expectation. */
+  assertionCode?: string;
+  /** Optional model rationale; never executed or copied into native output. */
+  notes?: string;
+}
+
+/**
+ * The Generator stage: a single structured-output LLM call per scenario.
+ */
+export interface Generator {
+  generate(input: GeneratorInput): Promise<{ generated: GeneratedScenario; metrics: MetricSample[] }>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Stage 2: Execute                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Deterministic result of running one scenario's generated code via Playwright.
+ * Produced without any LLM involvement.
+ */
+export interface ExecutionRecord {
+  /** Source scenario block ID. */
+  blockId: string;
+  /** Whether the generated code ran without throwing. */
+  ok: boolean;
+  /** The exact code that was executed (action code, then assertion code). */
+  code: string;
+  /** Serialized return value of the executed body, when any. */
+  observation?: unknown;
+  /** Failure detail when `ok` is `false`. */
+  error?: AgentResultError;
+  /** Page URL observed after execution. */
+  url?: string;
+  /** Page title observed after execution. */
+  title?: string;
+  /** ISO timestamp for when execution started. */
+  startedAt: string;
+  /** ISO timestamp for when execution finished. */
+  finishedAt: string;
+  /** Execution duration in milliseconds. */
+  durationMs: number;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Stage 3: Heal                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Everything the Healer needs to diagnose one failed scenario.
+ */
+export interface HealerInput {
+  /** The scenario that failed. */
+  block: ScenarioBlock;
+  /** The code the Generator produced for it. */
+  generated: GeneratedScenario;
+  /** The failed execution record (carries the error). */
+  execution: ExecutionRecord;
+  /** Page snapshot captured at the point of failure. */
+  snapshot: PageSnapshot;
+  /** Test title, for orientation. */
+  testTitle: string;
+  /** Optional source slice (file:line + surrounding lines) for diagnosis. */
+  sourceContext?: string;
+}
+
+/**
+ * One diagnosed cause produced by the Healer model. The deterministic Report
+ * stage wraps these into full {@link FailureFinding}s (ids, evidence, provenance).
+ */
+export interface HealerFinding {
+  /** Short display title. */
+  title: string;
+  /** What kind of failure occurred. */
+  category: FailureFinding['category'];
+  /** Likely owner of the repair. */
+  owner: FailureFinding['owner'];
+  /** Numeric confidence in [0, 1]. */
+  confidence: number;
+  /** Concise explanation of the cause. */
+  explanation: string;
+  /** Optional fix proposal. */
+  suggestedFix?: SuggestedFix;
+}
+
+/**
+ * The Healer model's diagnosis for one failed scenario. Langwright assembles
+ * the full {@link FailureAnalysis} (runId, timestamp, fingerprint, evidence,
+ * approval policy) deterministically around this content.
+ */
+export interface HealerDiagnosis {
+  /** Human-readable summary of the failure. */
+  summary: string;
+  /** One or more diagnosed causes. */
+  findings: HealerFinding[];
+}
+
+/**
+ * The Healer stage: a single structured-output LLM call on failure.
+ */
+export interface Healer {
+  heal(input: HealerInput): Promise<{ diagnosis: HealerDiagnosis; metrics: MetricSample[] }>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Orchestration                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The full record of one scenario across the pipeline.
+ */
+export interface ScenarioRecord {
+  /** The scenario block. */
+  block: ScenarioBlock;
+  /** Code produced by the Generator. */
+  generated: GeneratedScenario;
+  /** Result of executing that code. */
+  execution: ExecutionRecord;
+  /** Healer diagnosis, present iff execution failed and Heal ran. */
+  diagnosis?: HealerDiagnosis;
+}
+
+/**
+ * DSL-facing outcome of running one scenario. A failed outcome throws at the
+ * awaited `scenario(...)` call, like a Playwright assertion.
+ */
+export interface ScenarioOutcome {
+  /** Whether the scenario passed. */
+  status: 'ok' | 'failed';
+  /** Failure detail when `status` is `failed`. */
+  error?: AgentResultError;
+}
+
+/**
+ * A persistent session for one test. Each awaited DSL call runs one scenario
+ * through {@link runScenario} (Generate -> Execute -> Heal-on-failure) against
+ * the live browser; {@link finalize} synthesizes the single execution result
+ * from the accumulated scenario records and metrics.
+ */
+export interface AgentSession {
+  /** Run one scenario through the pipeline and report its outcome. */
+  runScenario(block: ScenarioBlock): Promise<ScenarioOutcome>;
+  /** Assemble the aggregate execution result for the whole test. */
+  finalize(options?: { status?: TestStatus; error?: AgentResultError }): AgentExecutionResult;
+}
+
+/**
+ * Pluggable execution backend for Langwright.
+ *
+ * Custom executors can replace the default pipeline while preserving the same
+ * result attachment and failure behavior in the Playwright runner.
+ */
+export interface AgentExecutor {
+  /**
+   * Start a session for the per-test incremental runtime, where each awaited
+   * DSL call drives one scenario.
+   */
+  startSession(context: AgentTestContext): AgentSession;
+  /**
+   * Run all already-collected scenarios in one pass. Used by one-shot paths
+   * such as scope hooks.
+   */
+  run(context: AgentTestContext): Promise<AgentExecutionResult>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Configuration                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Per-role override for the Generator or Healer. When omitted, the role is
+ * derived from the base {@link LangwrightConfig.model}.
+ */
+export interface AgentRoleConfig {
+  /** Chat model for this role; defaults to the base config model. */
+  model?: BaseChatModel;
+  /** System-prompt override for this role. */
+  systemPrompt?: string;
+}
+
+/**
+ * Runtime configuration loaded from `langwright.config.*`.
+ *
+ * Langwright derives a Generator and a Healer from `model`; either role can be
+ * overridden (so they can use different models) via `generator`/`healer`.
+ */
+export interface LangwrightConfig {
+  /** Base chat model used for both the Generator and the Healer. */
+  model?: BaseChatModel;
+  /** Generator override: a role config or a fully built Generator. */
+  generator?: AgentRoleConfig | Generator;
+  /**
+   * Healer override. Healing is OPTIONAL — it only runs when a scenario fails
+   * (a passing scenario has nothing to fix). Provide a role config or a built
+   * Healer, or set `false` to disable healing entirely. When omitted, a Healer
+   * is derived from the base `model` if one is available; with no model and no
+   * explicit Healer, failures are reported with a deterministic diagnosis and
+   * no LLM heal step.
+   */
+  healer?: AgentRoleConfig | Healer | false;
+  /** Custom executor. When present, this takes precedence over `model`. */
+  executor?: AgentExecutor;
+  /** Human-readable agent name written to trajectory artifacts. */
+  agentName?: string;
+  /** Human-readable agent version written to trajectory artifacts. */
+  agentVersion?: string;
+  /** Stable run identifier used for trajectory grouping. */
+  sessionId?: string;
+  /** Custom formatter for the trajectory attachment. */
+  trajectoryFormatter?: AgentTrajectoryFormatter;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Stage 4: Report                                                            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Normalized result produced by the executor.
  *
  * This intentionally mirrors the parts of Playwright TestResult that are useful
- * as attachments, while keeping agent-specific fields such as instructions,
+ * as attachments, while keeping Langwright-specific fields such as scenarios,
  * trajectory events, model metrics, and generated native Playwright output.
  */
 export interface AgentExecutionResult {
-  /** Final Playwright-compatible status selected from the agent outcome. */
+  /** Final Playwright-compatible status selected from the run outcome. */
   status: TestStatus;
-  /** Wall-clock execution time for the agent run in milliseconds. */
+  /** Wall-clock execution time for the run in milliseconds. */
   duration: number;
-  /** Normalized errors reported by the agent or produced while invoking it. */
+  /** Normalized errors reported by the pipeline. */
   errors: AgentResultError[];
-  /** Agent-owned standard output lines from the final JSON response. */
+  /** Per-scenario summary lines aggregated into the run's stdout. */
   stdout: string[];
-  /** Agent-owned standard error lines from the final JSON response. */
+  /** Reserved standard error lines. */
   stderr: string[];
   /** Attachment metadata that Langwright will expose through Playwright. */
   attachments: AgentResultAttachment[];
-  /** Trace-derived tool execution steps, not Playwright's internal step tree. */
+  /** Scenario-derived execution steps, not Playwright's internal step tree. */
   steps: AgentResultStep[];
   /** Playwright annotations copied from `testInfo`. */
   annotations: AgentResultAnnotation[];
@@ -135,121 +402,27 @@ export interface AgentExecutionResult {
   metrics: AgentMetrics;
   /** First error in `errors`, matching Playwright's common result shape. */
   error?: AgentResultError;
-  /** Parsed final JSON payload returned by the agent when available. */
+  /** Deterministic final payload (status, stdout, summary). */
   final?: AgentFinalResult;
   /** Playwright test title copied from `testInfo`. */
   title: string;
-  /** Flattened `steps` instructions that were sent to the agent. */
+  /** Flattened action (`steps`) instructions across all scenarios. */
   actions: string[];
-  /** Flattened `expect` instructions that were sent to the agent. */
+  /** Flattened expectation instructions across all scenarios. */
   expectations: string[];
-  /** Ordered DSL instruction blocks, used to reconstruct per-turn trajectories. */
-  instructions?: AgentInstructionBlock[];
-  /** Structured view of every observed `playwright_run` call. */
+  /** Ordered scenario blocks, used to reconstruct per-scenario trajectories. */
+  instructions?: ScenarioBlock[];
+  /** Structured view of every executed scenario. */
   trajectory: AgentTrajectoryEvent[];
-  /** Generated native Playwright code assembled from successful tool calls. */
+  /** Generated native Playwright code assembled from the executed scenarios. */
   nativePlaywright?: NativePlaywrightArtifact;
   /** Structured diagnosis and repair proposal for non-passing runs. */
   failureAnalysis?: FailureAnalysis;
 }
 
 /**
- * Outcome of running one instruction block as a single agent turn.
- */
-export interface TurnResult {
-  /** Whether the agent completed this instruction successfully. */
-  status: 'ok' | 'failed';
-  /** Failure detail when `status` is `failed`. */
-  error?: AgentResultError;
-  /** Optional short per-turn note aggregated into the run's stdout. */
-  summary?: string;
-  /** Optional agent-authored diagnosis attached to a failed turn. */
-  failureAnalysis?: FailureAnalysis;
-}
-
-/**
- * A persistent multi-turn agent session for one test.
- *
- * Each awaited DSL call runs one instruction through {@link runInstruction}
- * against the live browser (state persists between turns); {@link finalize}
- * synthesizes the single execution result from the accumulated trace, turns,
- * and metrics.
- */
-export interface AgentSession {
-  /** Execute one instruction block as a turn and report its outcome. */
-  runInstruction(block: AgentInstructionBlock): Promise<TurnResult>;
-  /** Assemble the aggregate execution result for the whole test. */
-  finalize(options?: { status?: TestStatus; error?: AgentResultError }): AgentExecutionResult;
-}
-
-/**
- * Pluggable execution backend for Langwright.
- *
- * Custom executors can replace the default LangChain executor while preserving
- * the same result attachment and failure behavior in the Playwright runner.
- */
-export interface AgentExecutor {
-  /**
-   * Start a multi-turn session for the per-test incremental runtime, where each
-   * awaited DSL call drives one turn.
-   */
-  startSession(context: AgentTestContext): AgentSession;
-  /**
-   * Run all already-collected blocks in one pass and return the result. Used by
-   * one-shot paths such as scope hooks.
-   */
-  run(context: AgentTestContext): Promise<AgentExecutionResult>;
-}
-
-/**
- * Minimal contract Langwright delegates a test run to: any object exposing an
- * `invoke(input, options?)` method (a LangChain agent, a custom adapter, etc.).
- */
-export interface AgentDelegate {
-  invoke(input: unknown, options?: unknown): Promise<unknown> | unknown;
-}
-
-/**
- * Runtime configuration loaded from `langwright.config.*`.
- */
-export interface LangwrightConfig {
-  /** Invokable agent the default executor delegates each test run to. */
-  agent?: AgentDelegate;
-  /** Human-readable agent name written to trajectory artifacts. */
-  agentName?: string;
-  /** Human-readable agent version written to trajectory artifacts. */
-  agentVersion?: string;
-  /** Custom executor. When present, this takes precedence over `agent`. */
-  executor?: AgentExecutor;
-  /** Stable run identifier used for trajectory grouping. */
-  sessionId?: string;
-  /** Custom formatter for the trajectory attachment. */
-  trajectoryFormatter?: AgentTrajectoryFormatter;
-}
-
-/**
- * Raw tool-call event captured whenever the agent invokes `playwright_run`.
- */
-export interface AgentTraceEvent {
-  /** Tool name, currently `playwright_run`. */
-  tool: string;
-  /** Raw tool input supplied by the agent. */
-  input: unknown;
-  /** Tool output observation, when execution completed. */
-  output?: unknown;
-  /** Error message when the tool failed. */
-  error?: string;
-  /** ISO timestamp for when the tool call started. */
-  startedAt: string;
-  /** ISO timestamp for when the tool call finished. */
-  finishedAt?: string;
-  /** Tool-call duration in milliseconds. */
-  durationMs?: number;
-}
-
-/**
- * Structured trajectory event derived from a raw trace event for reporting and
- * downstream analysis.
+ * Structured trajectory event derived from one executed scenario, for reporting
+ * and downstream analysis.
  */
 export interface AgentTrajectoryEvent {
   /** Stable ID used by evidence locators, for example `playwright-1`. */
@@ -258,82 +431,57 @@ export interface AgentTrajectoryEvent {
   type: 'playwright';
   /** Human-readable event description. */
   description: string;
-  /** Playwright code body executed by the tool call. */
+  /** Playwright code executed for the scenario. */
   code: string;
-  /** Agent-declared purpose for the tool call. */
-  purpose?: PlaywrightRunPurpose;
-  /** Instruction block IDs this call implements. */
+  /** Scenario block IDs this event implements (always single-element here). */
   blockIds?: string[];
-  /** Whether this call should be considered for native-code generation. */
-  contributesToNativeCode?: boolean;
-  /** Simplified tool observation. */
+  /** Simplified execution observation. */
   observation?: unknown;
-  /** Error message when the tool call failed. */
+  /** Error message when the scenario failed. */
   error?: string;
-  /** ISO timestamp for when the tool call started. */
+  /** ISO timestamp for when execution started. */
   startedAt: string;
-  /** ISO timestamp for when the tool call finished. */
+  /** ISO timestamp for when execution finished. */
   finishedAt?: string;
-  /** Tool-call duration in milliseconds. */
+  /** Execution duration in milliseconds. */
   durationMs?: number;
 }
 
 /**
- * Agent-supplied reason for a `playwright_run` call.
- *
- * `probe` calls are exploratory and should not be copied into generated native
- * Playwright. `final` is the preferred marker for a clean replacement body.
- */
-export type PlaywrightRunPurpose = 'probe' | 'action' | 'assertion' | 'final';
-
-/**
- * Input schema accepted by the LangChain `playwright_run` tool.
- */
-export interface PlaywrightRunInput {
-  /** Playwright Test code to run inside the current test async function. */
-  body: string;
-  /** Why the agent is running this body. */
-  purpose?: PlaywrightRunPurpose;
-  /** Ordered Langwright instruction block IDs implemented by this code. */
-  blockIds?: string[];
-  /** Explicit include/exclude switch for native Playwright generation. */
-  contributesToNativeCode?: boolean;
-}
-
-/**
- * Generated native Playwright replacement assembled from successful tool calls.
+ * Generated native Playwright replacement assembled from executed scenarios.
  */
 export interface NativePlaywrightArtifact {
   /**
-   * `complete` means all selected code was accepted from a passing source run.
-   * `partial` means some selected code or source status was incomplete.
-   * `invalid` means no safe native Playwright body could be emitted.
+   * `complete` means every scenario executed green and contributed code.
+   * `partial` means the run ended non-passing or a scenario failed.
+   * `invalid` means no native Playwright body could be emitted.
    */
   status: 'complete' | 'partial' | 'invalid';
   /** Concatenated native Playwright body, ending with a newline when present. */
   body: string;
-  /** Accepted code spans grouped by source instruction metadata. */
+  /** Accepted code spans grouped by source scenario metadata. */
   spans: NativePlaywrightSpan[];
   /** Human-readable reasons for partial or invalid output. */
   diagnostics: string[];
 }
 
 /**
- * A contiguous generated code span and the instruction block it came from.
+ * A contiguous generated code span and the scenario block it came from.
  */
 export interface NativePlaywrightSpan {
-  /** Source instruction block ID, `mixed`, or `all-instructions`. */
+  /** Source scenario block ID. */
   blockId: string;
-  /** Source instruction kind when it can be narrowed to one block. */
+  /** Whether the span is the scenario's action code or assertion code. */
   kind: AgentInstructionBlockKind | 'mixed';
-  /** Sanitized Playwright code for this span. */
+  /** Playwright code for this span. */
   code: string;
-  /** Zero-based index of the source trace event. */
-  sourceTraceIndex?: number;
+  /** Zero-based index of the source scenario record. */
+  sourceBlockIndex?: number;
 }
 
 /**
- * Provider-agnostic LLM usage metrics extracted from LangChain responses.
+ * Provider-agnostic LLM usage metrics aggregated across Generator and Healer
+ * calls.
  */
 export interface AgentMetrics {
   /** Prompt/input token count when reported by the provider. */
@@ -354,23 +502,19 @@ export interface AgentMetrics {
 }
 
 /**
- * Final JSON payload the agent is expected to return after executing a test.
+ * Deterministic final payload summarizing the run.
  */
 export interface AgentFinalResult {
-  /** Agent-declared final status. */
+  /** Final status. */
   status?: TestStatus;
-  /** Agent-declared errors. Empty or omitted for passing runs. */
+  /** Errors. Empty or omitted for passing runs. */
   errors?: AgentResultError[];
-  /** Agent-declared standard output lines. */
+  /** Per-scenario summary lines. */
   stdout?: string[];
-  /** Agent-declared standard error lines. */
+  /** Reserved standard error lines. */
   stderr?: string[];
   /** Optional concise execution summary. */
   summary?: string;
-  /** Optional agent-authored diagnosis for non-passing runs. */
-  failureAnalysis?: FailureAnalysis;
-  /** Raw non-JSON or fallback-parsed response text. */
-  raw?: string;
 }
 
 /**
@@ -586,7 +730,7 @@ export interface AgentResultAttachment {
 }
 
 /**
- * Lightweight Playwright Test step representation derived from tool traces.
+ * Lightweight Playwright Test step representation derived from scenarios.
  */
 export interface AgentResultStep {
   /** Human-readable step title. */
@@ -597,7 +741,7 @@ export interface AgentResultStep {
   startTime: string;
   /** Step duration in milliseconds. */
   duration: number;
-  /** Step error when the underlying trace failed. */
+  /** Step error when the underlying scenario failed. */
   error?: AgentResultError;
 }
 

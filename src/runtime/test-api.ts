@@ -8,8 +8,8 @@ import type {
   TestInfo,
   TestType,
 } from '@playwright/test';
-import { appendAgentBlock } from './context.js';
-import { runBlockTurn } from './dsl.js';
+import { appendScenarioBlock } from './context.js';
+import { runScenarioBlock } from './dsl.js';
 import { recordFixtureNow, runLangwrightRuntime, runScopeHook } from './agent-run.js';
 import { wrapFixtureExtension } from '../fixtures/fixture-capture.js';
 import { CORE_FIXTURE_NAMES, OPTION_FIXTURE_NAMES } from '../fixtures/fixture-names.js';
@@ -102,8 +102,8 @@ function createEachHook(nativeRegistrar: NativeHookRegistrar, kind: EachHookKind
   return (titleOrInstruction: string, maybeInstruction?: string) => {
     const hook = normalizeHook(kind, titleOrInstruction, maybeInstruction);
     const runner = async (): Promise<void> => {
-      const block = appendAgentBlock('steps', hook.instruction);
-      await runBlockTurn(block);
+      const block = appendScenarioBlock(hook.instruction);
+      await runScenarioBlock(block);
     };
 
     if (hook.title) {

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { clearWorkerFixtures, consumeFixtureStore, recordFixture } from '../../src/fixtures/fixture-store.js';
+import { clearWorkerFixtures, consumeFixtureStore, recordFixture } from '../../src/fixtures/fixture-store';
 
 void describe('fixture-store', () => {
   void it('records and drains test-scoped captures for one test id', () => {

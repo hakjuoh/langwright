@@ -3,7 +3,6 @@ import { createAtifTrajectoryFormatter } from './atif.js';
 import { resolveRunSessionId } from './session-id.js';
 import type {
   AgentExecutionResult,
-  AgentFinalResult,
   AgentTrajectoryEvent,
   FailureAnalysis,
   NativePlaywrightArtifact,
@@ -93,7 +92,7 @@ function toAgentResultAttachment(
     workerIndex: result.workerIndex,
     parallelIndex: result.parallelIndex,
     metrics: result.metrics,
-    final: summarizeFinalResult(result.final),
+    final: result.final,
     title: result.title,
     actions: result.actions,
     expectations: result.expectations,
@@ -101,16 +100,6 @@ function toAgentResultAttachment(
     nativePlaywright: summarizeNativePlaywright(result.nativePlaywright),
     failureAnalysis: summarizeFailureAnalysis(result.failureAnalysis),
   };
-}
-
-function summarizeFinalResult(final: AgentFinalResult | undefined): AgentFinalResult | undefined {
-  if (!final) {
-    return undefined;
-  }
-
-  const { failureAnalysis: _failureAnalysis, ...summary } = final;
-
-  return summary;
 }
 
 function summarizeTrajectory(trajectory: AgentTrajectoryEvent[], detailsAttachment: string) {
@@ -123,7 +112,7 @@ function summarizeTrajectory(trajectory: AgentTrajectoryEvent[], detailsAttachme
     lastStep: lastEvent
       ? {
           id: lastEvent.id,
-          purpose: lastEvent.purpose,
+          blockIds: lastEvent.blockIds,
           durationMs: lastEvent.durationMs,
           status: lastEvent.error ? 'failed' : 'passed',
         }

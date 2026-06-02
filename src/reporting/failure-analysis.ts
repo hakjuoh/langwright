@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
 import type {
-  AgentFinalResult,
   AgentResultError,
   AgentTestContext,
-  AgentTraceEvent,
   AttachmentRef,
   FailureAnalysis,
   FailureEvidence,
   FailureFinding,
+  HealerDiagnosis,
   NativePlaywrightArtifact,
+  ScenarioRecord,
 } from '../shared/types.js';
 
 export const FAILURE_ANALYSIS_LIMITS = {
@@ -21,7 +21,10 @@ export const FAILURE_ANALYSIS_LIMITS = {
 interface BuildFailureAnalysisOptions {
   startedAt: Date;
   errors: AgentResultError[];
-  final?: AgentFinalResult;
+  /** The first failed scenario, when one exists. */
+  failedRecord?: ScenarioRecord;
+  /** Trajectory step id of the failed scenario, for evidence locators. */
+  failedStepId?: string;
   nativePlaywright?: NativePlaywrightArtifact;
 }
 
@@ -36,36 +39,38 @@ const trajectoryAttachment: AttachmentRef = {
 };
 
 /**
- * Build a conservative read-only diagnosis when the agent reports a non-passing
- * test without a complete structured analysis of its own.
+ * Assemble the read-only failure diagnosis for a non-passing test.
+ *
+ * When the Healer produced a diagnosis, its findings are wrapped with
+ * deterministic ids, evidence, run id, fingerprint, and approval policy.
+ * Otherwise a conservative fallback finding is inferred from the failed
+ * scenario's error.
  */
 export function buildFailureAnalysis(
   context: AgentTestContext,
   options: BuildFailureAnalysisOptions,
 ): FailureAnalysis {
-  const agentAuthored = options.final?.failureAnalysis;
+  const diagnosis = options.failedRecord?.diagnosis;
+  const evidence = buildEvidence(context, options);
+  const primaryError = options.failedRecord?.execution.error ?? options.errors.at(0);
 
-  if (agentAuthored) {
-    return enrichFailureAnalysis(context, boundFailureAnalysis(agentAuthored));
+  if (diagnosis && diagnosis.findings.length > 0) {
+    return enrichFailureAnalysis(
+      context,
+      boundFailureAnalysis(assembleHealedAnalysis(context, options, diagnosis, evidence)),
+    );
   }
 
-  const primaryError = options.errors.at(0);
-  const failedTraceEntries = context.trace
-    .map((event, index) => ({ event, index }))
-    .filter(({ event }) => Boolean(event.error));
   const summary = truncate(
-    primaryError?.message ?? 'The Langwright agent reported a failed test run.',
+    diagnosis?.summary ?? primaryError?.message ?? 'The Langwright agent reported a failed test run.',
     FAILURE_ANALYSIS_LIMITS.maxEvidenceDetailChars,
   );
-  const evidence = buildEvidence(context, failedTraceEntries, primaryError);
-  const finding = buildFinding(summary, evidence, context.trace, options.nativePlaywright);
-  const fingerprint = fingerprintFailure(context, evidence);
-  const suggestedFix = inferSuggestedFix(summary);
+  const finding = buildFallbackFinding(summary, evidence, Boolean(options.failedRecord), options.nativePlaywright);
 
   return {
     runId: buildRunId(context),
     timestamp: options.startedAt.toISOString(),
-    fingerprint,
+    fingerprint: fingerprintFailure(context, evidence),
     summary,
     findings: [finding],
     fixPlan: {
@@ -73,7 +78,7 @@ export function buildFailureAnalysis(
       rationale:
         'Review the failing expectation against the observed browser state, then either correct the product behavior or update the test requirement if the expectation is wrong.',
       suggestedFix: {
-        rationale: suggestedFix,
+        rationale: inferSuggestedFix(summary),
         risk: 'medium',
       },
       verification: [
@@ -86,18 +91,62 @@ export function buildFailureAnalysis(
   };
 }
 
-function buildFinding(
+/**
+ * Wrap the Healer's findings into a full FailureAnalysis with deterministic
+ * ids, shared evidence, run id, fingerprint, and approval policy.
+ */
+function assembleHealedAnalysis(
+  context: AgentTestContext,
+  options: BuildFailureAnalysisOptions,
+  diagnosis: HealerDiagnosis,
+  evidence: FailureEvidence[],
+): FailureAnalysis {
+  const findings: FailureFinding[] = diagnosis.findings.map((finding, index) => ({
+    id: `finding-${index + 1}`,
+    provenance: 'agent',
+    title: finding.title,
+    category: finding.category,
+    owner: finding.owner,
+    confidence: finding.confidence,
+    explanation: finding.explanation,
+    evidence,
+    suggestedFix: finding.suggestedFix,
+  }));
+  const summary = truncate(diagnosis.summary, FAILURE_ANALYSIS_LIMITS.maxExplanationChars);
+  const primaryFix = findings.find((finding) => finding.suggestedFix)?.suggestedFix;
+
+  return {
+    runId: buildRunId(context),
+    timestamp: options.startedAt.toISOString(),
+    fingerprint: fingerprintFailure(context, evidence),
+    summary,
+    findings,
+    fixPlan: {
+      findingIds: findings.map((finding) => finding.id),
+      rationale: primaryFix?.rationale ?? summary,
+      suggestedFix: primaryFix ?? { rationale: inferSuggestedFix(summary), risk: 'medium' },
+      verification: [
+        'Apply the suggested fix, then rerun the failing Langwright spec only.',
+        'Inspect langwright-result.json and langwright-trajectory.json if the failure repeats.',
+        'After a code or test change, rerun the closest related regression tests.',
+      ],
+    },
+    approvalPolicy: 'always',
+  };
+}
+
+function buildFallbackFinding(
   summary: string,
   evidence: FailureEvidence[],
-  trace: AgentTraceEvent[],
+  hasFailedScenario: boolean,
   nativePlaywright: NativePlaywrightArtifact | undefined,
 ): FailureFinding {
-  const owner = inferOwner(summary, trace);
+  const owner = inferOwner(summary, hasFailedScenario);
   const category = inferCategory(summary);
   const nativeDiagnostics = nativePlaywright?.diagnostics.join('\n');
   const explanation = truncate(
     [
-      'The test failed after Langwright executed the requested browser actions and assertions.',
+      'The test failed after Langwright generated and executed the requested browser actions and assertions.',
       'The primary failure evidence points to a mismatch between the requested expectation and the observed page state.',
       nativeDiagnostics ? `Native Playwright generation also reported: ${nativeDiagnostics}` : undefined,
     ]
@@ -142,11 +191,7 @@ function inferSuggestedFix(summary: string): string {
   return 'Review the failing expectation against the observed browser state, then either correct the product behavior or update the test requirement if the expectation is wrong.';
 }
 
-function buildEvidence(
-  context: AgentTestContext,
-  failedTraceEntries: Array<{ event: AgentTraceEvent; index: number }>,
-  primaryError: AgentResultError | undefined,
-): FailureEvidence[] {
+function buildEvidence(context: AgentTestContext, options: BuildFailureAnalysisOptions): FailureEvidence[] {
   const evidence: FailureEvidence[] = [];
   const testSourceEvidence = buildTestSourceEvidence(context);
 
@@ -154,19 +199,23 @@ function buildEvidence(
     evidence.push(testSourceEvidence);
   }
 
-  for (const { event, index } of failedTraceEntries.slice(0, 3)) {
+  const failedError = options.failedRecord?.execution.error;
+
+  if (options.failedStepId && failedError) {
     evidence.push({
       id: `evidence-${evidence.length + 1}`,
       provenance: 'fallback',
       locator: {
         kind: 'agent_step',
         trajectory: trajectoryAttachment,
-        stepId: `playwright-${index + 1}`,
+        stepId: options.failedStepId,
       },
-      detail: truncate(event.error ?? 'The Playwright tool call failed.', FAILURE_ANALYSIS_LIMITS.maxEvidenceDetailChars),
+      detail: truncate(failedError.message, FAILURE_ANALYSIS_LIMITS.maxEvidenceDetailChars),
       relevance: 'primary',
     });
   }
+
+  const primaryError = failedError ?? options.errors.at(0);
 
   if (primaryError) {
     evidence.push({
@@ -178,7 +227,7 @@ function buildEvidence(
         pattern: firstLine(primaryError.message),
       },
       detail: truncate(primaryError.message, FAILURE_ANALYSIS_LIMITS.maxEvidenceDetailChars),
-      relevance: failedTraceEntries.length > 0 ? 'supporting' : 'primary',
+      relevance: options.failedStepId && failedError ? 'supporting' : 'primary',
     });
   }
 
@@ -221,7 +270,7 @@ function inferCategory(message: string): FailureFinding['category'] {
   return 'defect';
 }
 
-function inferOwner(message: string, trace: AgentTraceEvent[]): FailureFinding['owner'] {
+function inferOwner(message: string, hasFailedScenario: boolean): FailureFinding['owner'] {
   const normalized = message.toLowerCase();
 
   if (/api key|credential|browser closed|worker|fixture|config/.test(normalized)) {
@@ -236,17 +285,14 @@ function inferOwner(message: string, trace: AgentTraceEvent[]): FailureFinding['
     return 'unknown';
   }
 
-  if (trace.length === 0) {
+  if (!hasFailedScenario) {
     return 'agent';
   }
 
   return 'unknown';
 }
 
-function titleForCategory(
-  category: FailureFinding['category'],
-  owner: FailureFinding['owner'],
-): string {
+function titleForCategory(category: FailureFinding['category'], owner: FailureFinding['owner']): string {
   if (category === 'flake') {
     return 'Likely timing or environment-sensitive failure';
   }
@@ -256,20 +302,17 @@ function titleForCategory(
   }
 
   if (owner === 'agent') {
-    return 'Agent failed to complete the requested test contract';
+    return 'Generated code failed to complete the requested test contract';
   }
 
   return 'Observed page state did not satisfy the test expectation';
 }
 
-function fingerprintFailure(
-  context: AgentTestContext,
-  evidence: FailureEvidence[],
-): string {
+function fingerprintFailure(context: AgentTestContext, evidence: FailureEvidence[]): string {
   const hash = createHash('sha256');
   hash.update(context.testInfo.title);
   hash.update('\n');
-  hash.update(context.blocks.map((block) => `${block.kind}:${block.text}`).join('\n'));
+  hash.update(context.blocks.map((block) => `${block.id}:${block.steps}:${block.expect ?? ''}`).join('\n'));
   hash.update('\n');
   hash.update(evidence.map((item) => `${item.locator.kind}:${locatorFingerprint(item.locator)}`).join('\n'));
 
@@ -290,6 +333,17 @@ function buildRunId(context: AgentTestContext): string {
 function boundFailureAnalysis(analysis: FailureAnalysis): FailureAnalysis {
   const sortedFindings = [...analysis.findings].sort((left, right) => right.confidence - left.confidence);
   const droppedFindings = Math.max(0, sortedFindings.length - FAILURE_ANALYSIS_LIMITS.maxFindings);
+  const findings = sortedFindings.slice(0, FAILURE_ANALYSIS_LIMITS.maxFindings).map((finding) => ({
+    ...finding,
+    provenance: finding.provenance ?? 'agent',
+    confidence: clampConfidence(finding.confidence),
+    explanation: truncate(finding.explanation, FAILURE_ANALYSIS_LIMITS.maxExplanationChars),
+    evidence: finding.evidence.slice(0, FAILURE_ANALYSIS_LIMITS.maxEvidencePerFinding).map((evidence) => ({
+      ...evidence,
+      provenance: evidence.provenance ?? 'agent',
+      detail: truncate(evidence.detail, FAILURE_ANALYSIS_LIMITS.maxEvidenceDetailChars),
+    })),
+  }));
 
   return {
     ...analysis,
@@ -298,17 +352,31 @@ function boundFailureAnalysis(analysis: FailureAnalysis): FailureAnalysis {
       ...(analysis.diagnostics ?? []),
       ...(droppedFindings > 0 ? [`Dropped ${droppedFindings} low-confidence finding(s) due to analysis bounds.`] : []),
     ],
-    findings: sortedFindings.slice(0, FAILURE_ANALYSIS_LIMITS.maxFindings).map((finding) => ({
-      ...finding,
-      provenance: finding.provenance ?? 'agent',
-      confidence: clampConfidence(finding.confidence),
-      explanation: truncate(finding.explanation, FAILURE_ANALYSIS_LIMITS.maxExplanationChars),
-      evidence: finding.evidence.slice(0, FAILURE_ANALYSIS_LIMITS.maxEvidencePerFinding).map((evidence) => ({
-        ...evidence,
-        provenance: evidence.provenance ?? 'agent',
-        detail: truncate(evidence.detail, FAILURE_ANALYSIS_LIMITS.maxEvidenceDetailChars),
-      })),
-    })),
+    findings,
+    // Keep fixPlan.findingIds consistent with the retained findings so it never
+    // references a finding that bounding dropped.
+    fixPlan: reconcileFixPlan(analysis.fixPlan, findings),
+  };
+}
+
+/**
+ * Drop fix-plan references to findings that were bounded away; if none of the
+ * referenced findings survived, point at all retained findings instead.
+ */
+function reconcileFixPlan(
+  fixPlan: FailureAnalysis['fixPlan'],
+  findings: FailureFinding[],
+): FailureAnalysis['fixPlan'] {
+  if (!fixPlan) {
+    return undefined;
+  }
+
+  const retainedIds = new Set(findings.map((finding) => finding.id));
+  const referenced = fixPlan.findingIds.filter((id) => retainedIds.has(id));
+
+  return {
+    ...fixPlan,
+    findingIds: referenced.length > 0 ? referenced : findings.map((finding) => finding.id),
   };
 }
 

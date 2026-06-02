@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPlaywrightRunScope } from '../../src/agent/runtime-scope.js';
-import type { AgentTestContext } from '../../src/shared/types.js';
+import { createPlaywrightRunScope } from '../../src/agent/runtime-scope';
+import type { AgentTestContext } from '../../src/shared/types';
 
 function buildContext(userFixtures: Record<string, unknown>): AgentTestContext {
   const playwright = { devices: {}, chromium: {}, firefox: {}, webkit: {}, selectors: {}, errors: {} };
@@ -12,7 +12,6 @@ function buildContext(userFixtures: Record<string, unknown>): AgentTestContext {
     testInfo: {} as AgentTestContext['testInfo'],
     blocks: [],
     nextBlockIndex: 0,
-    trace: [],
     userFixtures,
   };
 }

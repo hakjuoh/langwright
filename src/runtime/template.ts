@@ -1,21 +1,12 @@
 /**
- * Render a template-tagged instruction block into compact prompt text.
+ * Normalize a natural-language instruction string into compact prompt text.
  *
  * Indentation is stripped so tests can format natural-language instructions
- * like normal TypeScript without leaking whitespace noise into the agent prompt.
+ * like normal TypeScript without leaking whitespace noise into the prompt.
+ * Applied to both halves of every `scenario(steps, expect?)` call.
  */
-export function renderTemplate(strings: TemplateStringsArray, values: unknown[]): string {
-  let rendered = '';
-
-  strings.forEach((part, index) => {
-    rendered += part;
-
-    if (index < values.length) {
-      rendered += String(values[index]);
-    }
-  });
-
-  return rendered
+export function normalizeInstructionText(raw: string): string {
+  return raw
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)

@@ -27,28 +27,27 @@ test('get started link', async ({ page }) => {
 });</code></pre>
     </td>
     <td width="50%" valign="top">
-      <pre><code class="language-ts">import { test, steps, expect } from '@hakjuoh/langwright/test';
+      <pre><code class="language-ts">import { test, scenario } from '@hakjuoh/langwright/test';
 
 test('has title', async () => {
-&nbsp;&nbsp;steps&#96;
-&nbsp;&nbsp;&nbsp;&nbsp;Go to https://playwright.dev/.
-&nbsp;&nbsp;&#96;;
-
-&nbsp;&nbsp;expect&#96;
-&nbsp;&nbsp;&nbsp;&nbsp;The page title should contain Playwright.
-&nbsp;&nbsp;&#96;;
+&nbsp;&nbsp;await scenario(
+&nbsp;&nbsp;&nbsp;&nbsp;&#96;Go to https://playwright.dev/.&#96;,
+&nbsp;&nbsp;&nbsp;&nbsp;&#96;The page title should contain Playwright.&#96;,
+&nbsp;&nbsp;);
 });
 
 test('get started link', async () => {
-&nbsp;&nbsp;steps&#96;
-&nbsp;&nbsp;&nbsp;&nbsp;Go to https://playwright.dev/.
-&nbsp;&nbsp;&nbsp;&nbsp;Click the Get started link.
-&nbsp;&nbsp;&#96;;
-
-&nbsp;&nbsp;expect&#96;
-&nbsp;&nbsp;&nbsp;&nbsp;The Installation heading should be visible.
-&nbsp;&nbsp;&#96;;
+&nbsp;&nbsp;await scenario(
+&nbsp;&nbsp;&nbsp;&nbsp;&#96;Go to https://playwright.dev/. Click the Get started link.&#96;,
+&nbsp;&nbsp;&nbsp;&nbsp;&#96;The Installation heading should be visible.&#96;,
+&nbsp;&nbsp;);
 });</code></pre>
     </td>
   </tr>
 </table>
+
+Each `scenario(steps, expect?)` runs a four-stage pipeline — **generate → execute → heal → report**. A *Generator*
+agent converts the natural-language scenario into Playwright code (inspecting the live page for robust locators),
+Playwright executes that code directly (no LLM in the loop), and on failure a *Healer* agent diagnoses the cause and
+proposes a fix. This mirrors [Playwright's test agents](https://playwright.dev/docs/test-agents): the test plan is
+authored inline as natural language, so Langwright fuses the Generator and Healer roles into a single run.

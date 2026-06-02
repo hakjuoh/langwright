@@ -53,7 +53,6 @@ function buildAgentTestContext(
     testInfo,
     blocks,
     nextBlockIndex: blocks.length,
-    trace: [],
     sourceLocation: sourceLocationFromTestInfo(testInfo),
   };
 }
@@ -139,7 +138,7 @@ export async function runScopeHook(
     );
 
     const context = buildAgentTestContext(fixtures, page, testInfo, [
-      { id: 'block-1', kind: 'steps', text: instruction },
+      { id: 'block-1', steps: instruction },
     ]);
     context.userFixtures = consumeFixtureStore(testInfo.testId, exposedWorkerFixtureNames(testInfo));
 

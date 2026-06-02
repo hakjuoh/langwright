@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { toAtifTrajectory } from '../../src/reporting/atif.js';
-import type { AgentExecutionResult, AgentTrajectoryEvent } from '../../src/shared/types.js';
+import { toAtifTrajectory } from '../../src/reporting/atif';
+import type { AgentExecutionResult, AgentTrajectoryEvent } from '../../src/shared/types';
 
 function trajectoryEvent(id: string, code: string, blockIds: string[]): AgentTrajectoryEvent {
   return {
@@ -43,8 +43,8 @@ function result(): AgentExecutionResult {
     actions: ['go to the page'],
     expectations: ['the title is correct'],
     instructions: [
-      { id: 'block-1', kind: 'steps', text: 'go to the page' },
-      { id: 'block-2', kind: 'expectation', text: 'the title is correct' },
+      { id: 'block-1', steps: 'go to the page' },
+      { id: 'block-2', steps: 'verify the title', expect: 'the title is correct' },
     ],
     trajectory: [
       trajectoryEvent('playwright-1', 'await page.goto("https://example.com");', ['block-1']),
@@ -72,9 +72,9 @@ void describe('toAtifTrajectory (multi-turn)', () => {
     const secondAgent = atif.steps[3];
 
     assert.equal(firstAgent.tool_calls?.length, 1);
-    assert.match(String(firstAgent.tool_calls?.[0]?.arguments.body), /page\.goto/);
+    assert.match(String(firstAgent.tool_calls?.[0]?.arguments.code), /page\.goto/);
     assert.equal(secondAgent.tool_calls?.length, 1);
-    assert.match(String(secondAgent.tool_calls?.[0]?.arguments.body), /toHaveTitle/);
+    assert.match(String(secondAgent.tool_calls?.[0]?.arguments.code), /toHaveTitle/);
   });
 
   void it('collects trajectory events with unknown blocks into a trailing agent step', () => {
@@ -85,6 +85,6 @@ void describe('toAtifTrajectory (multi-turn)', () => {
 
     assert.equal(atif.steps.at(-1)?.source, 'agent');
     assert.equal(atif.steps.at(-1)?.tool_calls?.length, 1);
-    assert.match(String(atif.steps.at(-1)?.tool_calls?.[0]?.arguments.body), /waitForTimeout/);
+    assert.match(String(atif.steps.at(-1)?.tool_calls?.[0]?.arguments.code), /waitForTimeout/);
   });
 });

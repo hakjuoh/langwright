@@ -5,8 +5,8 @@ import {
   parseTestBodyFixtureNames,
   wrapFixtureExtension,
   wrapFixtureFunction,
-} from '../../src/fixtures/fixture-capture.js';
-import type { FixtureScope } from '../../src/fixtures/fixture-store.js';
+} from '../../src/fixtures/fixture-capture';
+import type { FixtureScope } from '../../src/fixtures/fixture-store';
 
 type Capture = [string, unknown, FixtureScope];
 

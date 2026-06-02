@@ -1,19 +1,21 @@
 import { ChatOpenAI } from '@langchain/openai';
-import { createAgent, defineConfig } from '@hakjuoh/langwright/config';
+import { defineConfig } from '@hakjuoh/langwright/config';
 
 /*
  * Langwright config examples for LangChain.js chat-model providers.
  *
  * Pick one provider block, install its package, uncomment its import, and pass
- * the selected model to `createAgent({ model })`.
+ * the selected model to `defineConfig({ model })`.
  *
- * Langwright requires a chat model that supports tool calling because browser
- * actions are exposed to the agent as the `playwright_run` tool.
+ * Langwright uses the model for two roles — the Generator (natural language ->
+ * Playwright code) and the Healer (diagnose failures) — via structured output.
+ * Any chat model that supports structured output works; tool calling is no
+ * longer required. Override a single role with `generator` / `healer` to use a
+ * different (e.g. stronger) model for it.
  *
- * Model fallbacks below intentionally prefer current frontier/tool-capable
- * models over cost-optimized defaults. Keep the environment-variable overrides
- * in place because provider catalogs, regions, and account entitlements change
- * quickly.
+ * Model fallbacks below intentionally prefer current frontier models over
+ * cost-optimized defaults. Keep the environment-variable overrides in place
+ * because provider catalogs, regions, and account entitlements change quickly.
  */
 
 // ---------------------------------------------------------------------------
@@ -199,5 +201,9 @@ export default defineConfig({
   // `agentName` defaults to "langwright-agent".
   // `agentVersion` defaults to the Langwright package version.
   // Override either field here only when you want custom trajectory metadata.
-  agent: createAgent({ model }),
+  model,
+  // Optionally give the Healer a stronger model than the Generator:
+  // healer: { model: new ChatOpenAI({ model: 'gpt-5.5' }) },
+  // Healing is optional (it only runs when a scenario fails). Disable it with:
+  // healer: false,
 });

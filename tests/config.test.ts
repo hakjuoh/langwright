@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { defineConfig } from '../../src/config.js';
+import { defineConfig } from '@hakjuoh/langwright/config';
 
 void describe('defineConfig', () => {
   void it('fills default agent metadata', () => {

@@ -10,10 +10,11 @@
 export { test } from './runtime/test-api.js';
 
 /**
- * `steps` records browser actions and `expect` records assertions, both as
- * natural-language instructions for the agent.
+ * `scenario(steps, expect?)` records a natural-language scenario: the browser
+ * actions to perform and an optional expectation to verify. Both are converted
+ * to Playwright code, executed, and healed on failure as one unit.
  */
-export { steps, expect } from './runtime/dsl.js';
+export { scenario } from './runtime/dsl.js';
 
 /**
  * Expose ad-hoc objects (for example a page object constructed in the test

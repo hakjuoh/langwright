@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterScopeFixtures, isSafeScopeBindingName } from '../../src/fixtures/fixture-names.js';
+import { filterScopeFixtures, isSafeScopeBindingName } from '../../src/fixtures/fixture-names';
 
 void describe('isSafeScopeBindingName', () => {
   void it('accepts plain and non-ASCII identifiers', () => {

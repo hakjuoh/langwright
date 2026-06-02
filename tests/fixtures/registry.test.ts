@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeRegistration } from '../../src/fixtures/registry.js';
+import { normalizeRegistration } from '../../src/fixtures/registry';
 
 void describe('normalizeRegistration', () => {
   void it('accepts the object form', () => {
