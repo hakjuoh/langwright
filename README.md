@@ -4,13 +4,7 @@ Langwright is a LangChain-powered Playwright testing library that makes end-to-e
 preserves the familiar Playwright workflow while allowing browser interactions and assertions to be written in natural
 language.
 
-<table>
-<tr>
-<th>Playwright</th>
-<th>Langwright</th>
-</tr>
-<tr>
-<td width="50%" valign="top">
+**Playwright**
 
 ```ts
 import { test, expect } from '@playwright/test';
@@ -29,8 +23,7 @@ test('get started link', async ({ page }) => {
 });
 ```
 
-</td>
-<td width="50%" valign="top">
+**Langwright**
 
 ```ts
 import { test, scenario } from '@hakjuoh/langwright/test';
@@ -49,10 +42,6 @@ test('get started link', async () => {
   );
 });
 ```
-
-</td>
-</tr>
-</table>
 
 Each `scenario(steps, expect?)` runs a four-stage pipeline — **generate → execute → heal → report**. A *Generator*
 agent converts the natural-language scenario into Playwright code (inspecting the live page for robust locators),
