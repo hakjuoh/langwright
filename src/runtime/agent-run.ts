@@ -4,7 +4,7 @@ import { attachAgentResult } from '../reporting/attachments.js';
 import { resolveSessionId } from '../reporting/session-id.js';
 import { loadLangwrightConfig } from '../config/config-loader.js';
 import { withAgentTestContext } from './context.js';
-import { createAgentExecutor } from '../agent/executor.js';
+import { createAgentExecutor } from '../agent/executor-factory.js';
 import { parseTestBodyFixtureNames } from '../fixtures/fixture-capture.js';
 import { OPTION_FIXTURE_NAMES } from '../fixtures/fixture-names.js';
 import { consumeFixtureStore, recordFixture } from '../fixtures/fixture-store.js';
