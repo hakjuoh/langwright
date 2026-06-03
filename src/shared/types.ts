@@ -356,10 +356,26 @@ export interface LangwrightConfig {
   agentName?: string;
   /** Human-readable agent version written to trajectory artifacts. */
   agentVersion?: string;
-  /** Stable run identifier used for trajectory grouping. */
-  sessionId?: string;
   /** Custom formatter for the trajectory attachment. */
   trajectoryFormatter?: AgentTrajectoryFormatter;
+  /**
+   * Stable run identifier used for trajectory grouping. This is the static
+   * form: supply it when you already know the run ID — e.g. a CI build ID or
+   * git SHA computed when the config module is loaded. For an ID that must be
+   * derived from the test, use {@link sessionIdResolver} instead; it takes
+   * precedence when both are set. When neither is set, Langwright auto-resolves
+   * a run-stable ID (the `LANGWRIGHT_SESSION_ID` env var, else a generated one
+   * shared across parallel workers).
+   */
+  sessionId?: string;
+  /**
+   * Resolver invoked once per agent run to derive the session ID from the run's
+   * {@link TestInfo}. Takes precedence over {@link sessionId}. Because it is the
+   * trajectory grouping key, it MUST return a value that is stable across the
+   * whole run — do not derive it from per-test fields such as the title or
+   * repeat index, or trajectories from one run will no longer group together.
+   */
+  sessionIdResolver?: (testInfo: TestInfo) => string;
 }
 
 /* -------------------------------------------------------------------------- */

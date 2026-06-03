@@ -54,6 +54,45 @@ type FirstParameterFixtureNames =
  * a non-destructured/rest/default/garbled signature the caller should not trust.
  */
 function firstParameterFixtureNames(fn: Function): FirstParameterFixtureNames {
+  const firstParam = firstParameterText(fn);
+
+  if (firstParam.kind !== 'param') {
+    return firstParam;
+  }
+
+  const text = firstParam.text;
+
+  if (text[0] !== '{' || text[text.length - 1] !== '}') {
+    return { kind: 'indeterminate' };
+  }
+
+  const inner = text.slice(1, -1).trim();
+
+  if (!inner) {
+    return { kind: 'names', names: [] };
+  }
+
+  return destructuredNames(inner);
+}
+
+/**
+ * Either a concrete first-parameter token, or the terminal `none`/`indeterminate`
+ * verdict reached before a token exists. Splitting this out keeps the verdict
+ * branches for "no parameter list" / "empty parameters" / "no first parameter"
+ * out of {@link firstParameterFixtureNames}, which only cares about the token.
+ */
+type FirstParameterText =
+  | { kind: 'param'; text: string }
+  | { kind: 'none' }
+  | { kind: 'indeterminate' };
+
+/**
+ * Recover the trimmed text of a function's first parameter, distinguishing a
+ * missing parameter list (`indeterminate`), an empty/parameterless signature
+ * (`none`), and an actual first parameter token (`param`). Mirrors Playwright by
+ * reading up to the first `)` and splitting on top-level commas.
+ */
+function firstParameterText(fn: Function): FirstParameterText {
   const afterParen = afterFirstParen(fn);
 
   if (afterParen === null) {
@@ -73,21 +112,19 @@ function firstParameterFixtureNames(fn: Function): FirstParameterFixtureNames {
     return { kind: 'none' };
   }
 
-  if (firstParam[0] !== '{' || firstParam[firstParam.length - 1] !== '}') {
-    return { kind: 'indeterminate' };
-  }
+  return { kind: 'param', text: firstParam };
+}
 
-  const inner = firstParam.slice(1, -1).trim();
-
-  if (!inner) {
-    return { kind: 'names', names: [] };
-  }
-
+/**
+ * Parse the comma-separated contents of a non-empty `{ ... }` destructure into
+ * fixture names, taking the source key before any `:` (alias/nested rename) and
+ * rejecting the whole signature as `indeterminate` the moment a token is not a
+ * plain identifier — matching Playwright's own name extraction.
+ */
+function destructuredNames(inner: string): FirstParameterFixtureNames {
   const names: string[] = [];
 
   for (const segment of splitByComma(inner)) {
-    // The source key is the text before the first colon (alias/nested rename),
-    // matching Playwright's own name extraction.
     const colon = segment.indexOf(':');
     const name = (colon === -1 ? segment : segment.slice(0, colon)).trim();
 

@@ -256,6 +256,19 @@ interface TurnEvent {
 }
 
 /**
+ * Run-level context shared by every agent step in a single trajectory. Bundling
+ * `modelName` and `fallbackTimestamp` keeps {@link buildAgentStep} within the
+ * max-params limit while making it explicit that these values are constant for
+ * the whole run rather than per-step inputs.
+ */
+interface AgentStepContext {
+  /** Model name recorded on each agent step, when known. */
+  modelName: string | undefined;
+  /** Timestamp used when no trajectory event supplies one. */
+  fallbackTimestamp: string;
+}
+
+/**
  * Build one user + agent step pair per instruction block, reconstructing each
  * turn from the trajectory events that cite the block's ID. Each event is
  * attributed to the earliest (source-order) block among its `blockIds`; events
@@ -279,16 +292,18 @@ function buildTurnSteps(result: AgentExecutionResult, modelName: string | undefi
 
   const steps: AtifStep[] = [];
   let stepId = 1;
+  // Constant for the whole run; threaded into every agent step via one object.
+  const context: AgentStepContext = { modelName, fallbackTimestamp: result.startTime };
 
   for (const [blockIndex, block] of blocks.entries()) {
     steps.push(buildUserStep(stepId++, block, result.startTime));
-    steps.push(buildAgentStep(stepId++, block, eventsFor(blockIndex), modelName, result.startTime));
+    steps.push(buildAgentStep(stepId++, block, eventsFor(blockIndex), context));
   }
 
   const leftover = eventsFor(-1);
 
   if (leftover.length > 0 || blocks.length === 0) {
-    steps.push(buildAgentStep(stepId++, undefined, leftover, modelName, result.startTime));
+    steps.push(buildAgentStep(stepId++, undefined, leftover, context));
   }
 
   return steps;
@@ -315,14 +330,13 @@ function buildAgentStep(
   stepId: number,
   block: ScenarioBlock | undefined,
   events: TurnEvent[],
-  modelName: string | undefined,
-  fallbackTimestamp: string,
+  context: AgentStepContext,
 ): AtifStep {
   return {
     step_id: stepId,
-    timestamp: events[0]?.event.startedAt ?? fallbackTimestamp,
+    timestamp: events[0]?.event.startedAt ?? context.fallbackTimestamp,
     source: 'agent',
-    model_name: modelName,
+    model_name: context.modelName,
     message: agentStepMessage(block, events.length),
     tool_calls: events.map(({ event, eventIndex }) => ({
       tool_call_id: toolCallId(eventIndex),

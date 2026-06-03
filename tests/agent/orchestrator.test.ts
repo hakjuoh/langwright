@@ -96,79 +96,85 @@ function block(id: string, steps: string, expect?: string): ScenarioBlock {
   return { id, steps, expect };
 }
 
+async function passesScenarioWithoutHealer(): Promise<void> {
+  const generator = stubGenerator(() => 'await page.ping();');
+  const healer = stubHealer(DIAGNOSIS);
+  const session = new LangwrightExecutor(generator, healer).startSession(fakeContext());
+
+  const outcome = await session.runScenario(block('block-1', 'ping the page'));
+  const result = session.finalize();
+
+  assert.equal(outcome.status, 'ok');
+  assert.equal(healer.calls, 0, 'a passing scenario must not invoke the Healer');
+  assert.equal(result.status, 'passed');
+  assert.equal(result.nativePlaywright?.status, 'complete');
+  assert.equal(result.metrics.extra.llm_call_count, 1, 'only the Generator ran');
+}
+
+async function healsFailedScenario(): Promise<void> {
+  const generator = stubGenerator(() => 'throw new Error("scenario boom");');
+  const healer = stubHealer(DIAGNOSIS);
+  const session = new LangwrightExecutor(generator, healer).startSession(fakeContext());
+
+  const outcome = await session.runScenario(block('block-1', 'do a thing', 'something is true'));
+  const result = session.finalize();
+
+  assert.equal(outcome.status, 'failed');
+  assert.match(outcome.error?.message ?? '', /scenario boom/);
+  assert.equal(healer.calls, 1, 'a failed scenario invokes the Healer once');
+  assert.equal(result.status, 'failed');
+  assert.ok(result.failureAnalysis, 'failed run carries failure analysis');
+  assert.equal(result.failureAnalysis?.findings[0]?.provenance, 'agent');
+  assert.match(result.failureAnalysis?.findings[0]?.title ?? '', /Action threw/);
+  assert.notEqual(result.nativePlaywright?.status, 'complete');
+  assert.equal(result.metrics.extra.llm_call_count, 2, 'Generator + Healer');
+  assert.equal(result.trajectory.length, 1);
+}
+
+async function reportsDeterministicDiagnosisWithoutHealer(): Promise<void> {
+  const generator = stubGenerator(() => 'throw new Error("scenario boom");');
+  const session = new LangwrightExecutor(generator).startSession(fakeContext());
+
+  const outcome = await session.runScenario(block('block-1', 'do a thing'));
+  const result = session.finalize();
+
+  assert.equal(outcome.status, 'failed');
+  assert.ok(result.failureAnalysis, 'failure analysis is still produced without a Healer');
+  assert.equal(result.failureAnalysis?.findings[0]?.provenance, 'fallback');
+  assert.equal(result.metrics.extra.llm_call_count, 1, 'only the Generator ran; no heal step');
+  assert.equal(result.metrics.extra.healer_call_count, 0);
+}
+
+async function runsScenariosFailFast(): Promise<void> {
+  const generator = stubGenerator((scenarioBlock) =>
+    scenarioBlock.id === 'block-1' ? 'throw new Error("first fails");' : 'await page.ping();',
+  );
+  const healer = stubHealer(DIAGNOSIS);
+  const context = fakeContext();
+  context.blocks = [block('block-1', 'first'), block('block-2', 'second')];
+
+  const result = await new LangwrightExecutor(generator, healer).run(context);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(generator.calls, 1, 'the second scenario must not run after the first fails');
+  assert.equal(result.trajectory.length, 1);
+}
+
+async function treatsBodyErrorAsFailedRun(): Promise<void> {
+  const generator = stubGenerator(() => 'await page.ping();');
+  const session = new LangwrightExecutor(generator, stubHealer(DIAGNOSIS)).startSession(fakeContext());
+
+  await session.runScenario(block('block-1', 'ok step'));
+  const result = session.finalize({ status: 'failed', error: { message: 'body-level failure' } });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error?.message, 'body-level failure');
+}
+
 void describe('LangwrightExecutor session', () => {
-  void it('passes a scenario without invoking the Healer and emits complete native code', async () => {
-    const generator = stubGenerator(() => 'await page.ping();');
-    const healer = stubHealer(DIAGNOSIS);
-    const session = new LangwrightExecutor(generator, healer).startSession(fakeContext());
-
-    const outcome = await session.runScenario(block('block-1', 'ping the page'));
-    const result = session.finalize();
-
-    assert.equal(outcome.status, 'ok');
-    assert.equal(healer.calls, 0, 'a passing scenario must not invoke the Healer');
-    assert.equal(result.status, 'passed');
-    assert.equal(result.nativePlaywright?.status, 'complete');
-    assert.equal(result.metrics.extra.llm_call_count, 1, 'only the Generator ran');
-  });
-
-  void it('heals a failed scenario, marks the run failed, and attaches failure analysis', async () => {
-    const generator = stubGenerator(() => 'throw new Error("scenario boom");');
-    const healer = stubHealer(DIAGNOSIS);
-    const session = new LangwrightExecutor(generator, healer).startSession(fakeContext());
-
-    const outcome = await session.runScenario(block('block-1', 'do a thing', 'something is true'));
-    const result = session.finalize();
-
-    assert.equal(outcome.status, 'failed');
-    assert.match(outcome.error?.message ?? '', /scenario boom/);
-    assert.equal(healer.calls, 1, 'a failed scenario invokes the Healer once');
-    assert.equal(result.status, 'failed');
-    assert.ok(result.failureAnalysis, 'failed run carries failure analysis');
-    assert.equal(result.failureAnalysis?.findings[0]?.provenance, 'agent');
-    assert.match(result.failureAnalysis?.findings[0]?.title ?? '', /Action threw/);
-    assert.notEqual(result.nativePlaywright?.status, 'complete');
-    assert.equal(result.metrics.extra.llm_call_count, 2, 'Generator + Healer');
-    assert.equal(result.trajectory.length, 1);
-  });
-
-  void it('reports a deterministic diagnosis when no Healer is configured (heal is optional)', async () => {
-    const generator = stubGenerator(() => 'throw new Error("scenario boom");');
-    const session = new LangwrightExecutor(generator).startSession(fakeContext());
-
-    const outcome = await session.runScenario(block('block-1', 'do a thing'));
-    const result = session.finalize();
-
-    assert.equal(outcome.status, 'failed');
-    assert.ok(result.failureAnalysis, 'failure analysis is still produced without a Healer');
-    assert.equal(result.failureAnalysis?.findings[0]?.provenance, 'fallback');
-    assert.equal(result.metrics.extra.llm_call_count, 1, 'only the Generator ran; no heal step');
-    assert.equal(result.metrics.extra.healer_call_count, 0);
-  });
-
-  void it('runs scenarios fail-fast in the one-shot path', async () => {
-    const generator = stubGenerator((scenarioBlock) =>
-      scenarioBlock.id === 'block-1' ? 'throw new Error("first fails");' : 'await page.ping();',
-    );
-    const healer = stubHealer(DIAGNOSIS);
-    const context = fakeContext();
-    context.blocks = [block('block-1', 'first'), block('block-2', 'second')];
-
-    const result = await new LangwrightExecutor(generator, healer).run(context);
-
-    assert.equal(result.status, 'failed');
-    assert.equal(generator.calls, 1, 'the second scenario must not run after the first fails');
-    assert.equal(result.trajectory.length, 1);
-  });
-
-  void it('treats a body error passed to finalize as a failed run even after a passing scenario', async () => {
-    const generator = stubGenerator(() => 'await page.ping();');
-    const session = new LangwrightExecutor(generator, stubHealer(DIAGNOSIS)).startSession(fakeContext());
-
-    await session.runScenario(block('block-1', 'ok step'));
-    const result = session.finalize({ status: 'failed', error: { message: 'body-level failure' } });
-
-    assert.equal(result.status, 'failed');
-    assert.equal(result.error?.message, 'body-level failure');
-  });
+  void it('passes a scenario without invoking the Healer and emits complete native code', passesScenarioWithoutHealer);
+  void it('heals a failed scenario, marks the run failed, and attaches failure analysis', healsFailedScenario);
+  void it('reports a deterministic diagnosis when no Healer is configured (heal is optional)', reportsDeterministicDiagnosisWithoutHealer);
+  void it('runs scenarios fail-fast in the one-shot path', runsScenariosFailFast);
+  void it('treats a body error passed to finalize as a failed run even after a passing scenario', treatsBodyErrorAsFailedRun);
 });

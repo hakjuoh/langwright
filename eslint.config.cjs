@@ -24,6 +24,14 @@ module.exports = [
       '@typescript-eslint': tsPlugin,
     },
     rules: {
+      'max-lines': ['error', { max: 1000, skipComments: true, skipBlankLines: true }],
+      'max-lines-per-function': ['error', { max: 50, skipComments: true, skipBlankLines: true }],
+      // "Single purpose only" cannot be checked semantically; these bound the
+      // structural complexity that a multi-purpose function tends to accumulate.
+      complexity: ['error', 10],
+      'max-statements': ['error', 20],
+      'max-depth': ['error', 3],
+      'max-params': ['error', 4],
       'no-eval': 'error',
       'no-implied-eval': 'error',
       'no-new-func': 'error',

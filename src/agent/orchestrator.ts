@@ -11,14 +11,17 @@ import type {
   AgentExecutor,
   AgentFinalResult,
   AgentMetrics,
+  AgentResultAttachment,
   AgentResultError,
   AgentResultStep,
   AgentSession,
   AgentTestContext,
   AgentTrajectoryEvent,
+  FailureAnalysis,
   Generator,
   Healer,
   MetricSample,
+  NativePlaywrightArtifact,
   ScenarioBlock,
   ScenarioOutcome,
   ScenarioRecord,
@@ -135,6 +138,22 @@ class LangwrightSession implements AgentSession {
   }
 }
 
+/** Aggregate metadata accumulated while a session ran, handed to the reporter. */
+interface ExecutionResultMeta {
+  startedAt: Date;
+  duration: number;
+  metrics: AgentMetrics;
+  options?: { status?: TestStatus; error?: AgentResultError };
+}
+
+/** Status, failed scenario, and errors derived from the scenario records. */
+interface ResolvedOutcome {
+  failedIndex: number;
+  failedRecord: ScenarioRecord | undefined;
+  status: TestStatus;
+  errors: AgentResultError[];
+}
+
 /**
  * Stage 4 — Report. Assemble the normalized execution result from the scenario
  * records: trajectory, native Playwright code, failure analysis, and metrics.
@@ -142,45 +161,14 @@ class LangwrightSession implements AgentSession {
 function buildExecutionResult(
   context: AgentTestContext,
   records: ScenarioRecord[],
-  meta: {
-    startedAt: Date;
-    duration: number;
-    metrics: AgentMetrics;
-    options?: { status?: TestStatus; error?: AgentResultError };
-  },
+  meta: ExecutionResultMeta,
 ): AgentExecutionResult {
-  const failedIndex = records.findIndex((record) => !record.execution.ok);
-  const failedRecord = failedIndex >= 0 ? records[failedIndex] : undefined;
-  const scenarioErrors = failedRecord?.execution.error ? [failedRecord.execution.error] : [];
-  const options = meta.options;
-  const status: TestStatus =
-    scenarioErrors.length > 0 || options?.error !== undefined || options?.status === 'failed'
-      ? 'failed'
-      : (options?.status ?? 'passed');
-  // A failed scenario's own error is the original Playwright threw and the body
-  // rethrows, so prefer it over the duplicate body error finalize is handed.
-  const errors = scenarioErrors.length > 0 ? scenarioErrors : options?.error ? [options.error] : [];
-  const stdout = records
-    .map((record) => scenarioSummary(record))
-    .filter((summary): summary is string => typeof summary === 'string' && summary.length > 0);
+  const outcome = resolveOutcome(records, meta.options);
+  const { status, errors } = outcome;
+  const stdout = collectStdout(records);
   const trajectory = buildTrajectory(records);
   const nativePlaywright = buildNativePlaywrightArtifact(records, status);
-  const failureAnalysis =
-    status === 'passed'
-      ? undefined
-      : buildFailureAnalysis(context, {
-          startedAt: meta.startedAt,
-          errors,
-          failedRecord,
-          failedStepId: failedIndex >= 0 ? `playwright-${failedIndex + 1}` : undefined,
-          nativePlaywright,
-        });
-  const final: AgentFinalResult = {
-    status,
-    errors: errors.length > 0 ? errors : undefined,
-    stdout: stdout.length > 0 ? stdout : undefined,
-    summary: stdout.length > 0 ? stdout.join('\n') : undefined,
-  };
+  const failureAnalysis = buildResultFailureAnalysis(context, meta, outcome, nativePlaywright);
 
   return {
     status,
@@ -189,13 +177,7 @@ function buildExecutionResult(
     error: errors.at(0),
     stdout,
     stderr: [],
-    attachments: [
-      { name: 'langwright-result.json', contentType: 'application/json' },
-      { name: 'langwright-trajectory.json', contentType: 'application/json' },
-      { name: 'langwright-native-playwright.ts', contentType: 'text/plain' },
-      { name: 'langwright-native-playwright.json', contentType: 'application/json' },
-      ...(failureAnalysis ? [{ name: 'langwright-failure-analysis.json', contentType: 'application/json' }] : []),
-    ],
+    attachments: buildResultAttachments(failureAnalysis !== undefined),
     steps: buildResultSteps(records),
     annotations: context.testInfo.annotations.map((annotation) => ({
       type: annotation.type,
@@ -206,7 +188,7 @@ function buildExecutionResult(
     workerIndex: context.testInfo.workerIndex,
     parallelIndex: context.testInfo.parallelIndex,
     metrics: meta.metrics,
-    final,
+    final: buildFinalResult(status, errors, stdout),
     title: context.testInfo.title,
     actions: records.flatMap((record) => splitInstructions(record.block.steps)),
     expectations: records.flatMap((record) => (record.block.expect ? splitInstructions(record.block.expect) : [])),
@@ -214,6 +196,97 @@ function buildExecutionResult(
     trajectory,
     nativePlaywright,
     failureAnalysis,
+  };
+}
+
+/**
+ * Derive run status and errors. A failed scenario's own error is what Playwright
+ * originally threw and the body rethrows, so prefer it over the duplicate body
+ * error finalize is handed.
+ */
+function resolveOutcome(records: ScenarioRecord[], options: ExecutionResultMeta['options']): ResolvedOutcome {
+  const failedIndex = records.findIndex((record) => !record.execution.ok);
+  const failedRecord = failedIndex >= 0 ? records[failedIndex] : undefined;
+  const scenarioErrors = failedRecord?.execution.error ? [failedRecord.execution.error] : [];
+  const status = deriveStatus(scenarioErrors, options);
+  const errors = deriveErrors(scenarioErrors, options);
+
+  return { failedIndex, failedRecord, status, errors };
+}
+
+/**
+ * A run is `failed` when any scenario errored, or when finalize was handed an
+ * explicit failure (error or status). Otherwise honor the caller's requested
+ * status, defaulting to `passed`. Extracted so the ternary cluster stays below
+ * the cyclomatic-complexity limit and reads as a single decision.
+ */
+function deriveStatus(scenarioErrors: AgentResultError[], options: ExecutionResultMeta['options']): TestStatus {
+  if (scenarioErrors.length > 0 || options?.error !== undefined || options?.status === 'failed') {
+    return 'failed';
+  }
+
+  return options?.status ?? 'passed';
+}
+
+/**
+ * Prefer the scenario's own error (the original Playwright throw) over the
+ * duplicate body error finalize receives; fall back to the option error, then
+ * to no errors. Extracted to keep {@link resolveOutcome} under the complexity
+ * limit while preserving the exact precedence.
+ */
+function deriveErrors(scenarioErrors: AgentResultError[], options: ExecutionResultMeta['options']): AgentResultError[] {
+  if (scenarioErrors.length > 0) {
+    return scenarioErrors;
+  }
+
+  return options?.error ? [options.error] : [];
+}
+
+/** Per-scenario observation lines, dropping scenarios that produced none. */
+function collectStdout(records: ScenarioRecord[]): string[] {
+  return records
+    .map((record) => scenarioSummary(record))
+    .filter((summary): summary is string => typeof summary === 'string' && summary.length > 0);
+}
+
+/** Build the failure diagnosis for a non-passing run; passing runs have none. */
+function buildResultFailureAnalysis(
+  context: AgentTestContext,
+  meta: ExecutionResultMeta,
+  outcome: ResolvedOutcome,
+  nativePlaywright: NativePlaywrightArtifact,
+): FailureAnalysis | undefined {
+  if (outcome.status === 'passed') {
+    return undefined;
+  }
+
+  return buildFailureAnalysis(context, {
+    startedAt: meta.startedAt,
+    errors: outcome.errors,
+    failedRecord: outcome.failedRecord,
+    failedStepId: outcome.failedIndex >= 0 ? `playwright-${outcome.failedIndex + 1}` : undefined,
+    nativePlaywright,
+  });
+}
+
+/** The fixed attachment manifest, plus failure analysis when the run failed. */
+function buildResultAttachments(hasFailureAnalysis: boolean): AgentResultAttachment[] {
+  return [
+    { name: 'langwright-result.json', contentType: 'application/json' },
+    { name: 'langwright-trajectory.json', contentType: 'application/json' },
+    { name: 'langwright-native-playwright.ts', contentType: 'text/plain' },
+    { name: 'langwright-native-playwright.json', contentType: 'application/json' },
+    ...(hasFailureAnalysis ? [{ name: 'langwright-failure-analysis.json', contentType: 'application/json' }] : []),
+  ];
+}
+
+/** The Playwright-facing summary view of the run. */
+function buildFinalResult(status: TestStatus, errors: AgentResultError[], stdout: string[]): AgentFinalResult {
+  return {
+    status,
+    errors: errors.length > 0 ? errors : undefined,
+    stdout: stdout.length > 0 ? stdout : undefined,
+    summary: stdout.length > 0 ? stdout.join('\n') : undefined,
   };
 }
 

@@ -42,34 +42,7 @@ export function finalizeMetrics(samples: MetricSample[]): AgentMetrics {
   const metrics = emptyMetrics();
 
   for (const sample of samples) {
-    const promptTokens = readNumber(sample.usage, ['prompt_tokens', 'promptTokens', 'input_tokens', 'inputTokens']);
-    const completionTokens = readNumber(sample.usage, [
-      'completion_tokens',
-      'completionTokens',
-      'output_tokens',
-      'outputTokens',
-    ]);
-    const totalTokens = readNumber(sample.usage, ['total_tokens', 'totalTokens']);
-    const cachedTokens =
-      readNumber(sample.usage, ['cached_tokens', 'cachedTokens', 'cache_read', 'cacheRead']) ??
-      readNumber(sample.usage, ['input_token_details.cache_read', 'inputTokenDetails.cacheRead']);
-    const costUsd = readNumber(sample.usage, ['cost_usd', 'costUsd']);
-    const modelName = readString(sample.metadata, ['model_name', 'modelName', 'model']);
-    const modelProvider = readString(sample.metadata, ['model_provider', 'modelProvider', 'provider']);
-
-    metrics.prompt_tokens = sumNullable(metrics.prompt_tokens, promptTokens);
-    metrics.completion_tokens = sumNullable(metrics.completion_tokens, completionTokens);
-    metrics.total_tokens = sumNullable(metrics.total_tokens, totalTokens);
-    metrics.cached_tokens = sumNullable(metrics.cached_tokens, cachedTokens);
-    metrics.cost_usd = sumNullable(metrics.cost_usd, costUsd);
-
-    if (modelName) {
-      metrics.extra.model = modelName;
-    }
-
-    if (modelProvider) {
-      metrics.extra.provider = modelProvider;
-    }
+    accumulateSample(metrics, sample);
   }
 
   metrics.extra.llm_call_count = samples.length;
@@ -79,6 +52,43 @@ export function finalizeMetrics(samples: MetricSample[]): AgentMetrics {
   }
 
   return metrics;
+}
+
+/**
+ * Fold one sample's token, cost, model, and provider usage into the running
+ * aggregate. Extracted from {@link finalizeMetrics} so the per-sample field
+ * mapping lives in one single-purpose place and keeps the reducer's statement
+ * count within the structural limits.
+ */
+function accumulateSample(metrics: AgentMetrics, sample: MetricSample): void {
+  const promptTokens = readNumber(sample.usage, ['prompt_tokens', 'promptTokens', 'input_tokens', 'inputTokens']);
+  const completionTokens = readNumber(sample.usage, [
+    'completion_tokens',
+    'completionTokens',
+    'output_tokens',
+    'outputTokens',
+  ]);
+  const totalTokens = readNumber(sample.usage, ['total_tokens', 'totalTokens']);
+  const cachedTokens =
+    readNumber(sample.usage, ['cached_tokens', 'cachedTokens', 'cache_read', 'cacheRead']) ??
+    readNumber(sample.usage, ['input_token_details.cache_read', 'inputTokenDetails.cacheRead']);
+  const costUsd = readNumber(sample.usage, ['cost_usd', 'costUsd']);
+  const modelName = readString(sample.metadata, ['model_name', 'modelName', 'model']);
+  const modelProvider = readString(sample.metadata, ['model_provider', 'modelProvider', 'provider']);
+
+  metrics.prompt_tokens = sumNullable(metrics.prompt_tokens, promptTokens);
+  metrics.completion_tokens = sumNullable(metrics.completion_tokens, completionTokens);
+  metrics.total_tokens = sumNullable(metrics.total_tokens, totalTokens);
+  metrics.cached_tokens = sumNullable(metrics.cached_tokens, cachedTokens);
+  metrics.cost_usd = sumNullable(metrics.cost_usd, costUsd);
+
+  if (modelName) {
+    metrics.extra.model = modelName;
+  }
+
+  if (modelProvider) {
+    metrics.extra.provider = modelProvider;
+  }
 }
 
 /**
@@ -97,23 +107,7 @@ export function collectMetricSamples(value: unknown, samples: MetricSample[], se
     return;
   }
 
-  const responseMetadata = firstRecord(value.response_metadata, value.responseMetadata);
-  const usage =
-    firstRecord(value.usage_metadata, value.usageMetadata) ??
-    (responseMetadata ? firstRecord(responseMetadata.tokenUsage, responseMetadata.token_usage) : undefined);
-  const metadata = responseMetadata ?? {};
-
-  if (usage) {
-    const key = metricIdentity(value, metadata);
-
-    if (!key || !seenMetricKeys.has(key)) {
-      samples.push({ usage, metadata });
-
-      if (key) {
-        seenMetricKeys.add(key);
-      }
-    }
-  }
+  recordUsageSample(value, samples, seenMetricKeys);
 
   if (Array.isArray(value.messages)) {
     collectMetricSamples(value.messages, samples, seenMetricKeys);
@@ -121,6 +115,39 @@ export function collectMetricSamples(value: unknown, samples: MetricSample[], se
 
   if (isRecord(value.kwargs)) {
     collectMetricSamples(value.kwargs, samples, seenMetricKeys);
+  }
+}
+
+/**
+ * Pull the usage record off a single message container and, if it has not been
+ * seen before, push a sample. Split out of {@link collectMetricSamples} so the
+ * recursive walk stays simple while the dedupe/usage-resolution logic — the
+ * source of most of the branching — lives on its own and stays under the
+ * cyclomatic-complexity limit.
+ */
+function recordUsageSample(
+  value: Record<string, unknown>,
+  samples: MetricSample[],
+  seenMetricKeys: Set<string>,
+): void {
+  const responseMetadata = firstRecord(value.response_metadata, value.responseMetadata);
+  const usage =
+    firstRecord(value.usage_metadata, value.usageMetadata) ??
+    (responseMetadata ? firstRecord(responseMetadata.tokenUsage, responseMetadata.token_usage) : undefined);
+  const metadata = responseMetadata ?? {};
+
+  if (!usage) {
+    return;
+  }
+
+  const key = metricIdentity(value, metadata);
+
+  if (!key || !seenMetricKeys.has(key)) {
+    samples.push({ usage, metadata });
+
+    if (key) {
+      seenMetricKeys.add(key);
+    }
   }
 }
 
@@ -135,6 +162,17 @@ function metricIdentity(message: Record<string, unknown>, metadata: Record<strin
     return `id:${id}`;
   }
 
+  return usageIdentity(message, metadata);
+}
+
+/**
+ * Build the fallback dedupe key from a message's token counts when it carries no
+ * stable id. Extracted from {@link metricIdentity} because the multi-key reads
+ * plus the "any token present" test push the combined function past the
+ * cyclomatic-complexity limit; isolating the token branch keeps both halves
+ * single-purpose and compliant.
+ */
+function usageIdentity(message: Record<string, unknown>, metadata: Record<string, unknown>): string | undefined {
   const model = readString(metadata, ['model_name', 'modelName', 'model']) ?? 'unknown-model';
   const promptTokens = readNumber(message, ['usage_metadata.input_tokens', 'usageMetadata.inputTokens']);
   const completionTokens = readNumber(message, ['usage_metadata.output_tokens', 'usageMetadata.outputTokens']);

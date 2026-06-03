@@ -3,6 +3,7 @@ import type {
   AgentResultError,
   AgentTestContext,
   AttachmentRef,
+  EvidenceLocator,
   FailureAnalysis,
   FailureEvidence,
   FailureFinding,
@@ -405,27 +406,76 @@ function enrichFailureAnalysis(context: AgentTestContext, analysis: FailureAnaly
   };
 }
 
-function locatorFingerprint(locator: FailureEvidence['locator']): string {
+/** Narrowed locator variants, keyed by `kind`, so per-kind helpers stay typed. */
+type LocatorOf<Kind extends EvidenceLocator['kind']> = Extract<EvidenceLocator, { kind: Kind }>;
+
+/**
+ * Build a stable, collision-resistant fingerprint fragment for one locator.
+ *
+ * The `??`-heavy variants are split into dedicated helpers so this dispatch stays
+ * a flat switch within the complexity budget; the produced string for every input
+ * shape is byte-for-byte identical to the original inline implementation.
+ */
+function locatorFingerprint(locator: EvidenceLocator): string {
   switch (locator.kind) {
     case 'source_range':
-      return `${locator.file}:${locator.ranges.map((range) => `${range.startLine}-${range.endLine ?? range.startLine}`).join(',')}`;
+      return sourceRangeFingerprint(locator);
     case 'agent_step':
       return locator.stepId;
     case 'dom_node':
-      return locator.selector ?? locator.role ?? locator.text ?? locator.htmlExcerpt ?? 'dom';
+      return domNodeFingerprint(locator);
     case 'trace_event':
       return locator.eventId;
     case 'log_span':
-      return `${locator.startLine ?? ''}-${locator.endLine ?? ''}:${locator.pattern ?? ''}`;
+      return logSpanFingerprint(locator);
     case 'network_request':
-      return `${locator.requestId}:${locator.status ?? ''}`;
+      return networkRequestFingerprint(locator);
     case 'external_html_fragment':
-      return `${locator.url}:${locator.selector ?? locator.textFragment ?? ''}`;
+      return externalHtmlFragmentFingerprint(locator);
     case 'screenshot_region':
-      return `${locator.image.uri}:${locator.bbox.x},${locator.bbox.y},${locator.bbox.width},${locator.bbox.height}`;
+      return screenshotRegionFingerprint(locator);
     case 'video_segment':
-      return `${locator.video.uri}:${locator.startMs}-${locator.endMs}`;
+      return videoSegmentFingerprint(locator);
   }
+}
+
+/** `source_range`: file plus comma-joined `startLine-endLine` ranges. */
+function sourceRangeFingerprint(locator: LocatorOf<'source_range'>): string {
+  const ranges = locator.ranges
+    .map((range) => `${range.startLine}-${range.endLine ?? range.startLine}`)
+    .join(',');
+
+  return `${locator.file}:${ranges}`;
+}
+
+/** `dom_node`: first present of selector/role/text/htmlExcerpt, else `dom`. */
+function domNodeFingerprint(locator: LocatorOf<'dom_node'>): string {
+  return locator.selector ?? locator.role ?? locator.text ?? locator.htmlExcerpt ?? 'dom';
+}
+
+/** `log_span`: `startLine-endLine:pattern`, with absent parts left blank. */
+function logSpanFingerprint(locator: LocatorOf<'log_span'>): string {
+  return `${locator.startLine ?? ''}-${locator.endLine ?? ''}:${locator.pattern ?? ''}`;
+}
+
+/** `network_request`: `requestId:status`, with absent status left blank. */
+function networkRequestFingerprint(locator: LocatorOf<'network_request'>): string {
+  return `${locator.requestId}:${locator.status ?? ''}`;
+}
+
+/** `external_html_fragment`: url plus the first present of selector/textFragment. */
+function externalHtmlFragmentFingerprint(locator: LocatorOf<'external_html_fragment'>): string {
+  return `${locator.url}:${locator.selector ?? locator.textFragment ?? ''}`;
+}
+
+/** `screenshot_region`: image uri plus the four bbox coordinates. */
+function screenshotRegionFingerprint(locator: LocatorOf<'screenshot_region'>): string {
+  return `${locator.image.uri}:${locator.bbox.x},${locator.bbox.y},${locator.bbox.width},${locator.bbox.height}`;
+}
+
+/** `video_segment`: video uri plus the `startMs-endMs` span. */
+function videoSegmentFingerprint(locator: LocatorOf<'video_segment'>): string {
+  return `${locator.video.uri}:${locator.startMs}-${locator.endMs}`;
 }
 
 function clampConfidence(value: number): number {

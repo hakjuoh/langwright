@@ -1,7 +1,7 @@
 import type { PlaywrightTestArgs, TestInfo } from '@playwright/test';
 import { createAtifTrajectoryFormatter } from '../reporting/atif.js';
 import { attachAgentResult } from '../reporting/attachments.js';
-import { resolveRunSessionId } from '../reporting/session-id.js';
+import { resolveSessionId } from '../reporting/session-id.js';
 import { loadLangwrightConfig } from '../config/config-loader.js';
 import { withAgentTestContext } from './context.js';
 import { createAgentExecutor } from '../agent/executor.js';
@@ -14,6 +14,8 @@ import type {
   AgentResultError,
   AgentSourceLocation,
   AgentTestContext,
+  AgentTrajectoryFormatter,
+  LangwrightConfig,
   LangwrightFixtureOptions,
   LangwrightFixtures,
 } from '../shared/types.js';
@@ -77,6 +79,21 @@ function sourceLocationFromTestInfo(testInfo: TestInfo): AgentSourceLocation | u
 }
 
 /**
+ * Use the configured trajectory formatter, or default to ATIF seeded with the
+ * agent identity and a session id resolved from the test.
+ */
+function resolveTrajectoryFormatter(config: LangwrightConfig, testInfo: TestInfo): AgentTrajectoryFormatter {
+  return (
+    config.trajectoryFormatter ??
+    createAtifTrajectoryFormatter({
+      agentName: config.agentName,
+      agentVersion: config.agentVersion,
+      sessionId: resolveSessionId(config, testInfo),
+    })
+  );
+}
+
+/**
  * Load the executor, run one agent invoke for the collected blocks, attach the
  * artifacts, and surface a non-passing run as a Playwright failure.
  *
@@ -88,13 +105,7 @@ async function runAgentForContext(context: AgentTestContext): Promise<void> {
   const config = await loadLangwrightConfig();
   const executor = createAgentExecutor(config);
   const result = await executor.run(context);
-  const trajectoryFormatter =
-    config.trajectoryFormatter ??
-    createAtifTrajectoryFormatter({
-      agentName: config.agentName,
-      agentVersion: config.agentVersion,
-      sessionId: config.sessionId ?? resolveRunSessionId(context.testInfo),
-    });
+  const trajectoryFormatter = resolveTrajectoryFormatter(config, context.testInfo);
 
   await attachAgentResult(context.testInfo, result, trajectoryFormatter);
 
@@ -192,13 +203,7 @@ export async function runLangwrightRuntime(
     context.exposedWorkerNames = exposedWorkerFixtureNames(startInfo);
     const session = executor.startSession(context);
     context.session = session;
-    const trajectoryFormatter =
-      config.trajectoryFormatter ??
-      createAtifTrajectoryFormatter({
-        agentName: config.agentName,
-        agentVersion: config.agentVersion,
-        sessionId: config.sessionId ?? resolveRunSessionId(startInfo),
-      });
+    const trajectoryFormatter = resolveTrajectoryFormatter(config, startInfo);
 
     // The body and any beforeEach/afterEach hooks run during `use()`; each
     // awaited DSL call executes one turn through `session`. A failed turn (or a

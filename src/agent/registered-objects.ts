@@ -39,41 +39,79 @@ function describeScopeValueUnsafe(name: string, value: unknown): string {
 
   const valueType = typeof value;
 
+  // Primitives (and symbol/bigint) get a serialized-value summary; objects and
+  // functions get a structural (methods/keys) summary instead.
   if (valueType !== 'object' && valueType !== 'function') {
-    let serialized: string;
-
-    try {
-      serialized = JSON.stringify(value) ?? String(value);
-    } catch {
-      serialized = String(value);
-    }
-
-    return `${name}: ${valueType} = ${sanitizeToken(serialized)}`;
+    return describePrimitiveScopeValue(name, valueType, value);
   }
 
+  return describeObjectScopeValue(name, value);
+}
+
+/**
+ * Summarize a non-object, non-function value as `name: type = serialized`.
+ *
+ * Extracted from {@link describeScopeValueUnsafe} so the serialization branch —
+ * with its JSON.stringify fallback to String() for unserializable primitives
+ * (e.g. bigint) — is a single-purpose unit that stays within the complexity and
+ * statement limits.
+ */
+function describePrimitiveScopeValue(name: string, valueType: string, value: unknown): string {
+  let serialized: string;
+
+  try {
+    serialized = JSON.stringify(value) ?? String(value);
+  } catch {
+    serialized = String(value);
+  }
+
+  return `${name}: ${valueType} = ${sanitizeToken(serialized)}`;
+}
+
+/**
+ * Summarize an object or function by its constructor label plus, preferring
+ * methods over keys, its callable or own member names.
+ *
+ * Extracted from {@link describeScopeValueUnsafe} so the constructor/method/key
+ * introspection branch — the bulk of the original branching — is isolated and
+ * each path (methods present, keys present, bare label) stays single-purpose and
+ * within the complexity and statement limits.
+ */
+function describeObjectScopeValue(name: string, value: unknown): string {
   const constructorName =
     isRecord(value) && typeof value.constructor === 'function' ? value.constructor.name : undefined;
-  const methods = collectMethodNames(value);
   const label =
     constructorName && constructorName !== 'Object' ? `${name} (${sanitizeToken(constructorName)})` : name;
 
-  if (methods.length > 0) {
-    const shown = methods.slice(0, 12).map(sanitizeToken).join(', ');
+  const methods = collectMethodNames(value as object);
 
-    return `${label} — methods: ${shown}${methods.length > 12 ? ', …' : ''}`;
+  if (methods.length > 0) {
+    return `${label} — methods: ${formatMemberList(methods)}`;
   }
 
   if (isRecord(value)) {
     const keys = Object.keys(value);
 
     if (keys.length > 0) {
-      const shown = keys.slice(0, 12).map(sanitizeToken).join(', ');
-
-      return `${label} — keys: ${shown}${keys.length > 12 ? ', …' : ''}`;
+      return `${label} — keys: ${formatMemberList(keys)}`;
     }
   }
 
   return label;
+}
+
+/**
+ * Render a member-name list capped at 12 entries, sanitizing each token and
+ * appending an ellipsis when the list was truncated.
+ *
+ * Shared by the methods and keys branches of {@link describeObjectScopeValue} so
+ * the identical "slice 12, sanitize, join, maybe-ellipsis" shaping lives in one
+ * place rather than being duplicated per branch.
+ */
+function formatMemberList(members: string[]): string {
+  const shown = members.slice(0, 12).map(sanitizeToken).join(', ');
+
+  return `${shown}${members.length > 12 ? ', …' : ''}`;
 }
 
 /**
