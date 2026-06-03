@@ -5,13 +5,15 @@ preserves the familiar Playwright workflow while allowing browser interactions a
 language.
 
 <table>
-  <tr>
-    <th>Playwright</th>
-    <th>Langwright</th>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <pre><code class="language-ts">import { test, expect } from '@playwright/test';
+<tr>
+<th>Playwright</th>
+<th>Langwright</th>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+```ts
+import { test, expect } from '@playwright/test';
 
 test('has title', async ({ page }) => {
   await page.goto('https://playwright.dev/');
@@ -24,26 +26,32 @@ test('get started link', async ({ page }) => {
   await expect(
     page.getByRole('heading', { name: 'Installation' }),
   ).toBeVisible();
-});</code></pre>
-    </td>
-    <td width="50%" valign="top">
-      <pre><code class="language-ts">import { test, scenario } from '@hakjuoh/langwright/test';
+});
+```
+
+</td>
+<td width="50%" valign="top">
+
+```ts
+import { test, scenario } from '@hakjuoh/langwright/test';
 
 test('has title', async () => {
-&nbsp;&nbsp;await scenario(
-&nbsp;&nbsp;&nbsp;&nbsp;&#96;Go to https://playwright.dev/.&#96;,
-&nbsp;&nbsp;&nbsp;&nbsp;&#96;The page title should contain Playwright.&#96;,
-&nbsp;&nbsp;);
+  await scenario(
+    `Go to https://playwright.dev/.`,
+    `The page title should contain Playwright.`,
+  );
 });
 
 test('get started link', async () => {
-&nbsp;&nbsp;await scenario(
-&nbsp;&nbsp;&nbsp;&nbsp;&#96;Go to https://playwright.dev/. Click the Get started link.&#96;,
-&nbsp;&nbsp;&nbsp;&nbsp;&#96;The Installation heading should be visible.&#96;,
-&nbsp;&nbsp;);
-});</code></pre>
-    </td>
-  </tr>
+  await scenario(
+    `Go to https://playwright.dev/. Click the Get started link.`,
+    `The Installation heading should be visible.`,
+  );
+});
+```
+
+</td>
+</tr>
 </table>
 
 Each `scenario(steps, expect?)` runs a four-stage pipeline — **generate → execute → heal → report**. A *Generator*
